@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 应用图标：参考 Qatar 客户端图标设计的相机造型（深灰机身 + 多彩光圈）。
+     无底板、透明背景，仅保留相机主体。
+     同一份 SVG 用于窗口图标、任务栏图标、托盘图标，并作为 exe 内嵌图标(app.ico)的源文件。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- 相机整体放大并居中：原始包围盒 (34,50)-(222,206) 映射为 224x186 居中 -->
+  <g transform="translate(-23.04,-23.04) scale(1.18)">
+
+    <!-- 机身（右侧快门凸台 + 机身主体） -->
+    <g fill="#3a4048">
+      <rect x="150" y="50" width="74" height="32" rx="12"/>
+      <rect x="34" y="72" width="188" height="134" rx="28"/>
+    </g>
+
+    <!-- 机身上的取景窗凹槽 -->
+    <rect x="52" y="84" width="40" height="15" rx="7.5" fill="#2b3138"/>
+
+    <!-- 镜头外圈 + 六片多彩光圈 -->
+    <circle cx="128" cy="140" r="57" fill="#23282e"/>
+    <g transform="translate(128,140)">
+      <path fill="#4693e4" transform="rotate(0)"   d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+      <path fill="#7fd04b" transform="rotate(60)"  d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+      <path fill="#4ec1c6" transform="rotate(120)" d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+      <path fill="#a8d84a" transform="rotate(180)" d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+      <path fill="#58a9ea" transform="rotate(240)" d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+      <path fill="#6cc9a0" transform="rotate(300)" d="M 48,0 A 48,48 0 0 1 24,41.57 L 10,17.32 A 20,20 0 0 0 20,0 Z"/>
+    </g>
+
+    <!-- 镜心 -->
+    <circle cx="128" cy="140" r="20" fill="#2b3138"/>
+    <circle cx="128" cy="140" r="7.5" fill="#5aa9e8"/>
+
+  </g>
+</svg>

@@ -1,0 +1,33 @@
+#include <windows.h>
+
+/* exe 文件图标：资源管理器 / 快捷方式 / 任务栏固定时显示。
+   源文件由 assets/icons/app.svg 预渲染出的多尺寸 ico（16/20/24/32/40/48/64/128/256）。 */
+1 ICON "assets/icons/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,3,0
+PRODUCTVERSION  1,0,3,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "Qtech"
+            VALUE "FileDescription",  "Qatar / QtPacker 客户端自动登录工具"
+            VALUE "FileVersion",      "1.0.3"
+            VALUE "InternalName",     "AutoLoginQatarTool"
+            VALUE "OriginalFilename", "AutoLoginQatarTool.exe"
+            VALUE "ProductName",      "AutoLoginQatarTool"
+            VALUE "ProductVersion",   "1.0.3"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

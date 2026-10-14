@@ -1,0 +1,185 @@
+# AutoLoginQatarTool（Rust 版）
+
+Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `autoLoginQatarTool`（C++ / Qt 版）的完整复刻。
+
+**产物是单个 exe，拷到任何 Windows 10/11 机器上直接双击即可运行**，不需要安装运行库、不需要带 DLL。
+
+当前版本：`v1.0.3`（与原版对齐）
+
+---
+
+## 与原版的关系
+
+行为、界面、配置全部对齐原版，配置项位置也完全一致，因此**从 C++ 版换过来无需重新填写账号密码**。
+
+| 功能 | 实现位置 | 说明 |
+| --- | --- | --- |
+| 进程监测 | `process.rs` | 每 500ms 一次 Toolhelp32 快照，匹配 `QaTar.exe` / `QtPacker.exe`，并对映像名做 `qtpacker` 不区分大小写兜底 |
+| 多客户端分发 | `app.rs` | 按当前出现的对话框判定目标客户端，分发到 Qatar / QtPacker 两套流程 |
+| 环境自适应 | `automation.rs` | 简体 / 繁体 / 英文三种对话框标题与登录按钮文案 |
+| 控件定位 | `automation.rs` | 按几何位置而非控件顺序定位（密码框取最下方 Edit、账户框取密码框上方纵坐标最大的 ComboBox） |
+| 密码错误识别 | `automation.rs` | Qatar 匹配与语言无关的返回码 `ec: -3`；QtPacker 匹配标题 `Message` 且正文含 `Fail to login` 的提示框 |
+| 重置密码 | `net.rs` | `GET /api/user/forgetpwd?uid=工号`，响应体为 `1` 视为成功 |
+| 开机自启 | `settings.rs` | 写入 `HKCU\...\CurrentVersion\Run\autoLoginQatarApp` |
+| 配置持久化 | `settings.rs` | `HKCU\Software\Qtech\autoLoginQatarApp` |
+| 系统托盘 | `tray.rs` | 双击恢复主界面，右键菜单含状态展示 / 启停 / 显示 / 退出 |
+| 三态状态机 | `app.rs` | `Stopped` / `Running` / `Handling`，`Handling` 期间可被"停止"取消 |
+| 现代界面 | `paint.rs` + `theme.rs` | 无边框圆角卡片、状态徽标、自绘滑动开关、密码明文切换、矢量相机图标 |
+
+### 有意的差异
+
+- **没有外发光阴影**。原版用 `QGraphicsDropShadowEffect` 做柔化投影，需要逐像素 alpha 的分层窗口；而分层窗口无法承载原生输入框子控件。这里改用窗口圆角区域（`SetWindowRgn`）实现圆角卡片，代价是省掉了投影。
+- **弹窗用系统 MessageBox**，不再自绘对话框。
+- **托盘菜单为自绘菜单项**（白底 / 圆角高亮），但没有做菜单外框的圆角。
+- 原版托盘提示与标题均不带版本号，这里保持一致。
+
+---
+
+## 编译
+
+只依赖 Rust 工具链（`x86_64-pc-windows-gnu`），不需要 MSVC，也不需要 Qt。
+
+```bash
+cargo build --release
+```
+
+产物：`target/x86_64-pc-windows-gnu/release/AutoLoginQatarTool.exe`
+
+### 单 exe 是怎么做到的
+
+- `.cargo/config.toml` 里开了 `-C target-feature=+crt-static`：UCRT 与 MinGW 运行库（libgcc / libwinpthread / libstdc++）全部静态链接进 exe。
+- `Cargo.toml` 的 release profile 开了 `lto = "fat"`、`codegen-units = 1`、`panic = "abort"`、`strip = "symbols"`。
+- 唯一的外部依赖是 `windows` crate（纯 Rust 的 Win32 绑定，只产生对系统 DLL 的调用）。
+
+验证方式：
+
+```bash
+objdump -p target/x86_64-pc-windows-gnu/release/AutoLoginQatarTool.exe | grep "DLL Name"
+```
+
+输出应当只有系统 DLL：`KERNEL32 / user32 / gdi32 / gdiplus / shell32 / advapi32 / winhttp / oleaut32 / ntdll` 以及 UCRT 的 `api-ms-win-crt-*`。
+
+### exe 图标
+
+`app.rc` 里的图标与版本信息由 `build.rs` 调用 MinGW 的 `windres` 编译后交给链接器。
+`build.rs` 会先在 `PATH` 里找 `windres`，再回退到几个常见 MinGW 安装路径；找不到时只打警告、不中断构建（此时 exe 不带文件图标）。
+
+---
+
+## 使用
+
+与原版一致：
+
+1. 运行 `AutoLoginQatarTool.exe`，填写"账户 / 工号"与"密码"。
+2. 按需打开"开机自启动"。
+3. 点 **启动**，状态徽标变绿"运行中"，此时账户与密码框会被禁用；要改先点 **停止**。
+4. 保持程序在托盘后台运行。`QaTar.exe` 或 `QtPacker.exe` 启动并弹出登录框时，程序延时 2 秒后自动填入账号密码并点击登录。
+5. 提示"密码与工号不匹配"说明账号或密码有误，改好后状态会自动恢复监测。
+6. 关闭窗口只会最小化到托盘；右键托盘图标 → **退出** 才真正结束进程。
+7. 密码默认掩码显示，点输入框右侧眼睛图标可切明文。
+8. 忘记密码时点 **重置**，程序按当前账户调用重置接口，新密码由服务端发到钉钉。
+
+### 配置位置
+
+```
+HKCU\Software\Qtech\autoLoginQatarApp     account / password / autoStart
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run\autoLoginQatarApp
+```
+
+> ⚠️ 密码以明文保存在注册表中，仅适合可信的个人办公机环境（与原版一致）。
+
+---
+
+## 实现要点（踩过的坑）
+
+写原生 Win32 GUI 时遇到几个不查到底就会被误导的坑，记在这里：
+
+### 1. 消息常量没导入会被当成"变量绑定"
+
+窗口过程里用常量做 `match` 分支时，如果这个常量**不在作用域内**，Rust 不会报错，而是把它当成一个新的变量绑定（catch-all），于是它之后的所有分支静默失效，只给一条 `unreachable_patterns` 警告。
+
+本项目就踩了：`WM_MOUSELEAVE` 在 `windows` crate 里定义于 `Win32::UI::Controls` 而非 `WindowsAndMessaging`，结果它之后的分支（`WM_TIMER`、`WM_COMMAND`、托盘、关闭……）全部不可达并被优化掉 —— 界面看着正常，但按钮点击、定时器、托盘菜单统统无效。
+
+现在 `main.rs` 顶部有 `#![deny(unreachable_patterns)]`，把这类问题直接升级为编译错误。
+
+### 2. WM_NCCREATE 必须显式返回 TRUE
+
+`DefWindowProc` 对 `WM_NCCREATE` 的返回值在本机实测为 `0`。若原样返回，窗口创建会被直接中断：`WM_CREATE` 根本不会发出，紧接着就是 `WM_NCDESTROY`，`CreateWindowEx` 返回 NULL 且 `GetLastError` 为 0（完全指不到真因）。
+
+`wnd.rs` 里的 `widget_wndproc` 因此显式 `return LRESULT(1)`。
+
+### 3. 自绘子控件要自己铺底色
+
+自绘控件都是圆角形状，四个角在形状之外；而子窗口有独立的绘制表面，双缓冲位图又是未初始化的。不先铺一层卡片底色，圆角外就会露出黑角。见 `App::paint_widget`。
+
+### 4. 写初始文本会触发回调回读
+
+`SetWindowTextW` 会同步触发 `EN_CHANGE` 回调，回调里回读两个输入框写回状态。初始化时先写账户框，此刻密码框还是空的，密码就被冲成空串了。`App` 用 `syncing` 标志在初始化期间屏蔽该回调。
+
+### 5. `GdipSaveImageToFile` 要的是编码器 CLSID
+
+`ImageFormatPNG` 是"图像格式"标识，不是"编码器" CLSID，两者 GUID 不同。传错会得到一个 0 字节的空文件，且没有明显报错。见 `preview.rs`。
+
+---
+
+## 目录结构
+
+```
+src/
+├── main.rs         程序入口、消息循环、DPI 感知、离屏渲染模式
+├── app.rs          App 状态、子控件创建与布局、状态机、托盘联动、绘制调度
+├── wnd.rs          窗口类注册与窗口过程
+├── automation.rs   客户端窗口自动化（定位 / 填值 / 点击 / 错误判定）
+├── process.rs      基于 Toolhelp32 快照的进程检测
+├── settings.rs     注册表读写（QSettings 等价）
+├── net.rs          重置密码接口（WinHTTP）
+├── tray.rs         托盘图标与自绘右键菜单
+├── paint.rs        各组件绘制
+├── theme.rs        配色与布局计算
+├── gfx.rs          GDI+ 绘图封装 + GDI 文本
+├── icon.rs         相机图标（GDI+ 复刻 app.svg）与 HICON 生成
+├── preview.rs      离屏渲染成 PNG
+├── model.rs        状态枚举
+├── trace.rs        启动追踪（--selftest）
+└── util.rs         矩形 / 颜色 / 宽字符串工具
+```
+
+---
+
+## 调试辅助
+
+### 离屏渲染
+
+没有桌面也能逐像素检查界面：
+
+```bash
+AutoLoginQatarTool.exe --render-preview <输出目录> [缩放倍数]
+```
+
+会输出 `00-图标.png` 与 `01..05-*.png`（已停止 / 运行中 / 登录中-密码明文 / 悬停停止按钮 / 悬停关闭按钮）。
+
+### 启动追踪
+
+窗口不出现时，让程序自己把"走到哪一步"落盘：
+
+```bash
+AutoLoginQatarTool.exe --selftest <日志文件>
+```
+
+自检模式会在 4 秒后自动退出。
+
+### 接口地址覆盖
+
+重置密码接口的地址可用环境变量覆盖，便于自测与灰度：
+
+```
+AUTOLOGIN_RESET_HOST=127.0.0.1
+AUTOLOGIN_RESET_PORT=18099
+```
+
+---
+
+## 未验证的部分
+
+- **未对生产接口发起过真实重置请求**（会给真人钉钉发新密码，副作用太大）。网络路径是用本地回环 HTTP 服务验证的：确认程序发出了 `GET /api/user/forgetpwd?uid=<工号>` 并正确处理了响应体。
+- **未在真实 `QaTar.exe` / `QtPacker.exe` 客户端上跑过完整登录**。窗口自动化逻辑是逐条对照原版 C++ 代码移植的，定位规则、消息发送方式（`SendMessage` / `PostMessage`）、错误码匹配均保持一致。

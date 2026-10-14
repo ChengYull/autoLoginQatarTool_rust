@@ -1,0 +1,10 @@
+# 目标平台：x86_64-pc-windows-gnu（复用本机 MinGW-w64，无需 MSVC）
+#
+# +crt-static 是关键：它让 UCRT 与 MinGW 运行库（libgcc / libwinpthread /
+# libstdc++）全部静态链接进 exe，产物只依赖 Windows 自带的系统 DLL，
+# 从而做到「单个 exe 拷到任何 Win10/11 机器上都能跑」。
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+target = "x86_64-pc-windows-gnu"
