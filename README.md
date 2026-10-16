@@ -1,8 +1,10 @@
 # AutoLoginQatarTool（Rust 版）
 
 Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `autoLoginQatarTool`（C++ / Qt 版）的完整复刻。
+仓库里还带一个**更新服务端**（`server/`），负责发布新版本并让客户端知道该不该升级。
 
 **产物是单个 exe，拷到任何 Windows 10/11 机器上直接双击即可运行**，不需要安装运行库、不需要带 DLL。
+客户端和服务端都是如此，各自只有一个文件。
 
 当前版本：`v1.0.1`
 
@@ -48,15 +50,108 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 
 ---
 
+## 更新服务端
+
+`server/` 是一个独立的小程序：内置 HTTP 服务 + 一个原生管理窗口，管"发布新版本"这件事。
+
+### 它解决什么问题
+
+客户端的版本号是编译期写死在 exe 里的，靠人工通知"出新版了、去换一下"迟早会漏。
+有了服务端之后：发布一次 → 客户端启动时自己问一次 → 版本旧了徽章变黄。
+**客户端不做自动下载替换**（那是下一步），这里只负责"让用户知道该升级了"。
+
+### 管理界面
+
+双击 `AutoLoginServer.exe` 即用，打开就自动开始监听（不用再点一次「启动」）：
+
+| 区域 | 说明 |
+| --- | --- |
+| 服务状态 | 运行中 / 已停止，右侧显示累计请求数与下载数 |
+| 监听地址 | 默认 `0.0.0.0:18082`，改完点「启动」生效；运行中不可改 |
+| 已发布版本 | 版本号 / 发布时间 / 大小 / 下载次数 / 是否「最新」「强制」 |
+| 最近请求 | 最近 200 条访问日志，按状态码着色 |
+| 底部操作 | 发布新版本 / 设为最新 / 删除 / 打开数据目录 |
+
+**版本号不用手输**：选好 exe 之后，服务端直接从它的 `VERSIONINFO` 资源里读。
+人工再输一遍版本号是这类工具最常见的低级错误来源 —— 打错了表现为
+"服务端说最新是 1.0.3，客户端实际是 1.0.2"，很难查。
+
+**「最新」是显式设置的，不是取最大版本号**。这样某个版本出问题时可以把对外版本
+回滚到旧版，而不用把它从列表里删掉（删掉就没法排查了）。新发布的版本如果比当前
+对外版本新，会自动顶上；更旧则只入库、不动对外版本。
+
+### 接口
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /api/version?current=1.0.1` | 返回最新版本、更新说明、是否强制、下载地址、大小 |
+| `GET /api/download/<版本>` | 下载该版本的 exe（流式，不占内存） |
+| `GET /api/health` | 健康检查，返回 `{"status":"ok"}` |
+
+`/api/version` 的响应示例：
+
+```json
+{
+  "update": true,
+  "latest": "1.0.2",
+  "notes": "修复登录延时偶发失效",
+  "force": false,
+  "url": "/api/download/1.0.2",
+  "size": 458752,
+  "published_at": "2026-10-16 10:30:00"
+}
+```
+
+还没发布过任何版本时返回 `latest` 为空串的哨兵响应，客户端据此判定"没有更新"。
+
+### 数据与部署
+
+数据目录默认是 **exe 同级的 `data/`**（可用 `--data <目录>` 覆盖），所以「拷到哪、数据就在哪」：
+
+```text
+data/
+├── server.json                        监听地址等本机配置
+├── releases.json                      版本元数据
+└── files/
+    └── AutoLoginQatarTool-1.0.2.exe   各版本产物，客户端从这里下载
+```
+
+`releases.json` 写入走的是「先写 `.tmp` 再改名」，中途断电不会把原文件截成半截 JSON。
+
+客户端默认连 `10.170.1.137:18082`，可用环境变量覆盖（自测用）：
+
+```
+AUTOLOGIN_UPDATE_HOST=127.0.0.1
+AUTOLOGIN_UPDATE_PORT=18082
+```
+
+> ⚠️ 服务端目前是**明文 HTTP 且无鉴权**：任何能连上端口的人都能发布版本、下载产物。
+> 只适合放在可信内网。要往外网暴露的话，前面得挂一层带认证的反向代理。
+
+---
+
 ## 编译
 
 只依赖 Rust 工具链（`x86_64-pc-windows-gnu`），不需要 MSVC，也不需要 Qt。
 
 ```bash
-cargo build --release
+cargo build --release                  # 客户端
+cd server && cargo build --release     # 服务端
 ```
 
-产物：`target/x86_64-pc-windows-gnu/release/AutoLoginQatarTool.exe`
+产物：
+
+| 程序 | 路径 | 体积 |
+| --- | --- | --- |
+| 客户端 | `target/x86_64-pc-windows-gnu/release/AutoLoginQatarTool.exe` | ~450 KB |
+| 服务端 | `server/target/x86_64-pc-windows-gnu/release/AutoLoginServer.exe` | ~576 KB |
+
+两个都是单文件、只依赖系统 DLL。`server/` 是独立 crate，但会继承仓库根的
+`.cargo/config.toml`（`+crt-static` 与 GNU target），所以静态链接配置只有一份。
+
+> 服务端比客户端多一个纯 Rust 依赖 `serde` / `serde_json`：版本元数据要落盘持久化，
+> 更新说明里会有中文、引号、换行，转义写错了很难发现 —— 这类正确性不值得自己造轮子。
+> 它是静态链接的，不产生额外 DLL，单 exe 的约定不受影响。
 
 ### 单 exe 是怎么做到的
 
@@ -159,7 +254,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\autoLoginQatarApp
 ## 目录结构
 
 ```
-src/
+src/                    客户端
 ├── main.rs         程序入口、消息循环、DPI 感知、离屏渲染模式
 ├── app.rs          App 状态、子控件创建与布局、状态机、托盘联动、绘制调度
 ├── wnd.rs          窗口类注册与窗口过程
@@ -175,9 +270,27 @@ src/
 ├── icon.rs         相机图标（GDI+ 复刻 app.svg）与 HICON 生成
 ├── preview.rs      离屏渲染成 PNG
 ├── version.rs      版本号与新旧版本状态（版本号唯一来源）
+├── update.rs       向服务端查最新版本，驱动版本徽章的颜色
 ├── model.rs        状态枚举
 ├── trace.rs        启动追踪（--selftest）
 └── util.rs         矩形 / 颜色 / 宽字符串工具
+
+server/                 更新服务端（独立 crate）
+├── main.rs         程序入口、命令行（--publish / --render-preview / --export-icon）
+├── app.rs          管理窗口：状态、版本列表、请求日志、发布操作
+├── wnd.rs          窗口类注册与窗口过程
+├── http.rs         极简 HTTP/1.1 服务（std::net，零框架）
+├── store.rs        版本仓库：元数据持久化 + exe 版本号解析
+├── publish.rs      发布交互：文件选择 + 参数对话框
+├── config.rs       监听地址等本机配置
+├── paint.rs        管理界面绘制
+├── theme.rs        配色与布局
+├── backdrop.rs     卡片背景层（与客户端同一套圆角方案）
+├── gfx.rs          GDI+ 绘图封装 + GDI 文本
+├── icon.rs         服务端图标（机架服务器）
+├── preview.rs      离屏渲染 + 多尺寸 ico 生成
+├── model.rs        交互状态枚举
+└── trace.rs / util.rs
 ```
 
 ---
@@ -217,13 +330,32 @@ AUTOLOGIN_RESET_PORT=18099
 
 ### 强制显示「有新版本」
 
-自动更新的服务端还没接，版本徽章默认是绿色的「已是最新」。想看黄色态：
+不看服务端，直接把徽章改成黄色，用来核对样式：
 
 ```
 AUTOLOGIN_FORCE_UPDATE=1
 ```
 
-这只是把徽章改成黄色用于核对样式，不会真的去下载任何东西。
+不会真的去下载任何东西。
+
+### 服务端的命令行
+
+管理界面能做的事，命令行也能做 —— 便于脚本化部署与 CI：
+
+```bash
+# 发布一个版本：版本号自动从 exe 资源里读，不需要手输
+AutoLoginServer.exe --publish <exe 路径> --notes "更新说明" [--force]
+
+# 数据目录换一个（默认是 exe 同级的 data/）
+AutoLoginServer.exe --data <目录>
+
+# 离屏渲染管理界面 / 重新生成 exe 图标
+AutoLoginServer.exe --render-preview <目录> [缩放]
+AutoLoginServer.exe --export-icon assets/icons/server.ico
+```
+
+`--publish` 和界面里的「发布新版本」走的是同一份 `store::publish`，
+所以两条路发出来的版本不会不一致。
 
 ---
 
@@ -231,3 +363,5 @@ AUTOLOGIN_FORCE_UPDATE=1
 
 - **未对生产接口发起过真实重置请求**（会给真人钉钉发新密码，副作用太大）。网络路径是用本地回环 HTTP 服务验证的：确认程序发出了 `GET /api/user/forgetpwd?uid=<工号>` 并正确处理了响应体。
 - **未在真实 `QaTar.exe` / `QtPacker.exe` 客户端上跑过完整登录**。窗口自动化逻辑是逐条对照原版 C++ 代码移植的，定位规则、消息发送方式（`SendMessage` / `PostMessage`）、错误码匹配均保持一致。
+- **服务端只在同一台机器上用回环地址验证过**（本机起服务端 → 客户端连 `127.0.0.1` → 徽章变色；下载内容与源文件 sha256 一致）。跨机器、跨网段、防火墙放行这些都还没试过，部署前先确认 `18082` 端口在目标网段是通的。
+- **客户端只做到"知道有新版本"，不会自动下载替换**。`/api/version` 已经返回了下载地址和大小，`force` 字段也透传了，下一步接自动更新时不用改接口。

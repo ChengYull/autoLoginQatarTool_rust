@@ -27,6 +27,7 @@ use crate::process;
 use crate::settings::{self, Settings};
 use crate::theme::{self, Layout};
 use crate::tray::Tray;
+use crate::update::{self, UpdateOutcome};
 use crate::util::{colorref, from_wide, to_wide, Rect};
 use crate::version::{self, VersionState};
 
@@ -63,6 +64,8 @@ const TIMER_POLL: usize = 1;
 const TIMER_LOGIN: usize = 2;
 const TIMER_VERIFY: usize = 3;
 const TIMER_ANIM: usize = 4;
+/// 更新检查：先是一次性的"启动后延迟几秒"，之后改成 6 小时一轮
+const TIMER_UPDATE: usize = 5;
 
 /// 轮询间隔（毫秒）
 const POLL_INTERVAL_MS: u32 = 500;
@@ -76,6 +79,7 @@ const TOGGLE_ANIM_MS: u64 = 140;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_RESET_DONE: u32 = WM_APP + 2;
+pub const WM_UPDATE_DONE: u32 = WM_APP + 3;
 
 
 // ---------------------------------------------------------------------------
@@ -152,6 +156,9 @@ pub struct App {
     pub reset_busy: bool,
     reset_rx: Option<mpsc::Receiver<ResetResult>>,
 
+    /// 更新检查的结果回传通道（检查在后台线程里做）
+    update_rx: Option<mpsc::Receiver<UpdateOutcome>>,
+
     // 画刷
     pub brush_white: HBRUSH,
     pub brush_disabled: HBRUSH,
@@ -213,6 +220,7 @@ impl App {
             taskbar_created_msg,
             tray_tip: String::new(),
             reset_rx: None,
+            update_rx: None,
             reset_busy: false,
             brush_white: unsafe { CreateSolidBrush(COLORREF(colorref(theme::INPUT_BG))) },
             brush_disabled: unsafe {
@@ -233,6 +241,17 @@ impl App {
         self.tray.show(self.hicon);
         self.refresh_tray_tip();
         self.update_status_ui();
+        // 延迟几秒做第一次更新检查（等界面先出来），之后 on_update_timer 会改成 6 小时一轮。
+        // selftest 是调试模式，总共只活 4 秒，没必要等 —— 否则日志和截图里
+        // 永远看不到检查结果，等于没法验证这条链路。
+        let delay = if crate::trace::enabled() {
+            300
+        } else {
+            update::FIRST_CHECK_DELAY_MS
+        };
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), TIMER_UPDATE, delay, None);
+        }
     }
 
     /// 背景层要在主窗口显示之前建好，否则第一帧会先看到没有圆角的方角卡片
@@ -455,15 +474,71 @@ impl App {
         }
     }
 
-    /// 更新版本状态并重绘（有变化才重绘）。
-    ///
-    /// 自动更新的服务端接上后，检查完版本就调这里 —— 界面侧已经全部就位，
-    /// 不需要再改绘制或布局代码。
-    #[allow(dead_code)]
+    /// 更新版本状态并重绘（有变化才重绘）
     pub fn set_version_state(&mut self, state: VersionState) {
         if self.version_state != state {
             self.version_state = state;
             self.repaint();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 更新检查
+    // -----------------------------------------------------------------------
+
+    /// 起一次后台更新检查。上一次还没回来就跳过，避免请求堆积。
+    pub fn start_update_check(&mut self) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        // HWND 里是裸指针，不是 Send，不能直接搬进线程；按 isize 传
+        let hwnd_raw = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let outcome = update::check();
+            // 线程结束后用 PostMessage 把结果交回界面线程：
+            // 界面状态只能在界面线程里改，直接跨线程写会踩数据竞争。
+            if tx.send(outcome).is_ok() {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(hwnd_raw as *mut c_void)),
+                        WM_UPDATE_DONE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+        });
+    }
+
+    pub fn on_update_done(&mut self) {
+        let Some(rx) = self.update_rx.take() else {
+            return;
+        };
+        let Ok(outcome) = rx.try_recv() else {
+            return;
+        };
+        if !outcome.latest.is_empty() {
+            // 说明可能多行，落进日志前压成一行并截断
+            let notes: String = outcome.notes.replace(['\r', '\n'], " ").chars().take(60).collect();
+            crate::tlog!(
+                "更新检查：本机 v{}，服务端 v{}（{}）{}",
+                version::APP_VERSION,
+                outcome.latest,
+                if outcome.force { "强制更新" } else { "常规" },
+                notes
+            );
+        }
+        self.set_version_state(outcome.state);
+    }
+
+    /// 更新检查定时器：第一次是「启动后延迟几秒」，之后固定 6 小时一轮
+    pub fn on_update_timer(&mut self) {
+        self.start_update_check();
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_UPDATE);
+            let _ = SetTimer(Some(self.hwnd), TIMER_UPDATE, update::CHECK_INTERVAL_MS, None);
         }
     }
 

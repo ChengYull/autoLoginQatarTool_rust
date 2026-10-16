@@ -1,7 +1,10 @@
-//! 重置密码接口。
+//! HTTP 请求。
 //!
 //! 原版用 QNetworkAccessManager 发 GET：`?uid=工号`，成功时响应体只有一个字符 `1`，
 //! 重置后的新密码由服务端发送到钉钉。这里用系统自带的 WinHTTP，零第三方依赖。
+//!
+//! 除了重置密码，`update.rs` 的更新检查也走这里的 [`http_get_on`] —— 同一个
+//! WinHTTP 封装，只是换了 host / port。
 
 use std::ffi::c_void;
 
@@ -19,8 +22,8 @@ const DEFAULT_PORT: u16 = 18081;
 const PATH: &str = "/api/user/forgetpwd";
 const TIMEOUT_MS: i32 = 10_000;
 
-/// 接口地址。允许用环境变量覆盖，便于自测与灰度（默认走生产地址）。
-fn endpoint() -> (String, u16) {
+/// 重置密码接口地址。允许用环境变量覆盖，便于自测与灰度（默认走生产地址）。
+fn reset_endpoint() -> (String, u16) {
     let host = std::env::var("AUTOLOGIN_RESET_HOST").unwrap_or_else(|_| DEFAULT_HOST.to_string());
     let port = std::env::var("AUTOLOGIN_RESET_PORT")
         .ok()
@@ -48,7 +51,14 @@ pub fn reset_password(uid: &str) -> ResetResult {
 }
 
 fn http_get(path_and_query: &str) -> Result<String, String> {
-    let (host_name, port) = endpoint();
+    let (host, port) = reset_endpoint();
+    http_get_on(&host, port, path_and_query)
+}
+
+/// 明文 HTTP GET，返回响应体（已按 UTF-8 宽松解码）。
+///
+/// 同步阻塞调用，调用方负责放到后台线程里跑。
+pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<String, String> {
     unsafe {
         let agent = to_wide("AutoLoginQatarTool");
         let session = WinHttpOpen(
@@ -65,7 +75,7 @@ fn http_get(path_and_query: &str) -> Result<String, String> {
 
         let _ = WinHttpSetTimeouts(session, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS);
 
-        let host = to_wide(&host_name);
+        let host = to_wide(host_name);
         let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), port, 0);
         if connect.is_null() {
             drop(session_guard);

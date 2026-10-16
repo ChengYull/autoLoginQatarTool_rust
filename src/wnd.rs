@@ -11,7 +11,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{self, App, WM_RESET_DONE, WM_TRAY};
+use crate::app::{self, App, WM_RESET_DONE, WM_TRAY, WM_UPDATE_DONE};
 use crate::backdrop;
 use crate::tlog;
 use crate::icon;
@@ -231,6 +231,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                     2 => app.on_login_timer(),
                     3 => app.on_verify_timer(),
                     4 => app.on_anim_timer(),
+                    5 => app.on_update_timer(),
                     _ => {}
                 }
             }
@@ -340,6 +341,13 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_RESET_DONE => {
             if let Some(app) = app {
                 app.on_reset_done();
+            }
+            LRESULT(0)
+        }
+
+        WM_UPDATE_DONE => {
+            if let Some(app) = app {
+                app.on_update_done();
             }
             LRESULT(0)
         }

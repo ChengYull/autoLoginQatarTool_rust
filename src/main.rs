@@ -19,6 +19,7 @@ mod settings;
 mod theme;
 mod trace;
 mod tray;
+mod update;
 mod util;
 mod version;
 mod wnd;
