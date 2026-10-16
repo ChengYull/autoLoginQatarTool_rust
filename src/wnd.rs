@@ -12,6 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::app::{self, App, WM_RESET_DONE, WM_TRAY};
+use crate::backdrop;
 use crate::tlog;
 use crate::icon;
 use crate::model::Widget;
@@ -96,6 +97,11 @@ pub fn register_all(hinst: HINSTANCE) -> bool {
                 return false;
             }
             crate::tlog!("注册子控件类 ok class={}", class);
+        }
+
+        // 卡片背景层（分层窗口）
+        if !backdrop::register(hinst) {
+            return false;
         }
     }
     true
@@ -356,6 +362,15 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 app.tray.set_font(font);
             }
             LRESULT(0)
+        }
+
+        // 位置 / 尺寸 / 显隐 / z 序任何一项变化，背景层都要跟着走。
+        // 拖动时这一条保证背景层不会掉队。
+        WM_WINDOWPOSCHANGED => {
+            if let Some(app) = app {
+                app.sync_backdrop();
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
 
         WM_CLOSE => {

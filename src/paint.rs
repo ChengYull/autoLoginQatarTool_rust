@@ -41,8 +41,21 @@ impl<'a> VisualState<'a> {
 /// `widgets` 为 true 时连同子控件（按钮 / 开关 / 眼睛 / 输入文本）一起画，
 /// 用于离屏预览；实际运行时子控件是独立窗口，各自绘制，故传 false。
 pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widgets: bool) {
-    // 卡片
-    canvas.round_rect_filled_bordered(l.window, CARD_RADIUS * l.scale, rgb(CARD_BG), rgb(CARD_BORDER), 1.0);
+    if widgets {
+        // 离屏预览：这里没有背景层窗口，卡片自己画全（含 1px 描边）
+        canvas.round_rect_filled_bordered(
+            l.window,
+            CARD_RADIUS * l.scale,
+            rgb(CARD_BG),
+            rgb(CARD_BORDER),
+            1.0,
+        );
+    } else {
+        // 运行时：卡片外观（抗锯齿圆角 + 描边）由背景层窗口负责，
+        // 主窗口只负责铺底色 —— 它被裁成内缩 2px 的圆角区域，
+        // 边界落在背景层的白色卡片内部，同色所以看不见。
+        canvas.fill_rect(l.window, rgb(CARD_BG));
+    }
 
     // 标题栏
     draw_camera(canvas, l.icon.x, l.icon.y, l.icon.w);
@@ -85,9 +98,10 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     paint_button(canvas, f, l.btn_min, BtnKind::WinMin, "—", l.scale, vs.hovered(Widget::Min), vs.pressed(Widget::Min), false);
     paint_button(canvas, f, l.btn_close, BtnKind::WinClose, "✕", l.scale, vs.hovered(Widget::Close), vs.pressed(Widget::Close), false);
 
-    // 输入框内容
-    paint_field_text(canvas, f, l.account_edit, vs.account, "Emp ID / 员工ID / Uid", vs.fields_enabled);
-    paint_field_text(canvas, f, l.password_edit, &vs.password, "请输入客户端登录密码", vs.fields_enabled);
+    // 输入框内容。用整行矩形而不是 EDIT 的矩形：DT_VCENTER 会把字高盒子
+    // 居中，而原生 EDIT 是顶对齐 —— 两者只有基于「整行」时才落在同一条基线上。
+    paint_field_text(canvas, f, l.account_text, vs.account, "Emp ID / 员工ID / Uid", vs.fields_enabled);
+    paint_field_text(canvas, f, l.password_text, &vs.password, "请输入客户端登录密码", vs.fields_enabled);
 
     // 眼睛 + 重置
     draw_eye(

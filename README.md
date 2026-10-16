@@ -28,7 +28,8 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 
 ### 有意的差异
 
-- **没有外发光阴影**。原版用 `QGraphicsDropShadowEffect` 做柔化投影，需要逐像素 alpha 的分层窗口；而分层窗口无法承载原生输入框子控件。这里改用窗口圆角区域（`SetWindowRgn`）实现圆角卡片，代价是省掉了投影。
+- **没有外发光阴影**。原版用 `QGraphicsDropShadowEffect` 做柔化投影，而逐像素 alpha 的分层窗口无法承载原生输入框子控件，这里就没做投影。
+- **圆角卡片由一个独立的背景层窗口绘制**。窗口区域（`SetWindowRgn`）是 1 位掩码，圆弧只能用整像素台阶逼近，深色壁纸下会露出一圈毛刺；所以把「外观」和「输入」拆成两层：背景层是逐像素 alpha 的分层窗口，抗锯齿地画圆角与描边；主窗口只承载子控件，自身裁成**内缩 2px 的圆角区域**，硬边落在背景层白色卡片内部，同色所以看不见。见 `backdrop.rs`。
 - **弹窗用系统 MessageBox**，不再自绘对话框。
 - **托盘菜单为自绘菜单项**（白底 / 圆角高亮），但没有做菜单外框的圆角。
 - 原版托盘提示与标题均不带版本号，这里保持一致。
@@ -120,6 +121,22 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run\autoLoginQatarApp
 
 `ImageFormatPNG` 是"图像格式"标识，不是"编码器" CLSID，两者 GUID 不同。传错会得到一个 0 字节的空文件，且没有明显报错。见 `preview.rs`。
 
+### 6. 窗口圆角区域是 1 位掩码，做不出抗锯齿
+
+`SetWindowRgn` / `CreateRoundRectRgn` 生成的区域只有「在内 / 不在」两种状态，半径 14px 的圆弧只能用 4~5 级整像素台阶逼近，深色壁纸下就是一圈肉眼可见的毛刺 —— 这不是绘制质量问题，是窗口形状这一层根本表达不了灰度。
+
+而真正能抗锯齿的 `UpdateLayeredWindow` 逐像素 alpha 分层窗口**不承载原生子控件**（EDIT 会整片不显示）。两者不可兼得，所以拆成两个窗口：背景层画外观（`backdrop.rs`），主窗口装控件并把自身区域内缩 2px 藏进背景层的白卡里。细节见 `backdrop.rs` 顶部注释。
+
+注意 `UpdateLayeredWindow` 的 `AC_SRC_ALPHA` 要的是**预乘 alpha**，而 GDI+ 往 HDC 上画不会写 alpha 通道 —— 所以背景层没有用 GDI+，而是自己按 8x8 超采样算覆盖率、直接写预乘的 BGRA。
+
+### 7. 原生单行 EDIT 的文字是顶对齐的，不是垂直居中
+
+单行 EDIT 把文字顶到客户区上沿，基线 = 上沿 + `tmAscent`（`tmAscent` 含 `tmInternalLeading`）。而 GDI 的 `DT_VCENTER` 是把整个字高盒子垂直居中。同一个 30px 高的输入框里，前者比后者高 5px 左右 —— 看起来就是"字浮在框偏上方"。
+
+要让两者落在同一条基线上，EDIT 的上沿必须摆在「字段中心 − `tmHeight` / 2」，其中 `tmHeight` 取自 `GetTextMetricsW`。见 `theme.rs` 的 `Layout::compute_with` 与 `gfx.rs` 的 `Fonts::body_line_h`。
+
+同理，离屏预览里画输入框文字要用**整行**矩形（`account_text`）而不是 EDIT 的矩形，否则预览和真实窗口对不上。
+
 ---
 
 ## 目录结构
@@ -129,6 +146,7 @@ src/
 ├── main.rs         程序入口、消息循环、DPI 感知、离屏渲染模式
 ├── app.rs          App 状态、子控件创建与布局、状态机、托盘联动、绘制调度
 ├── wnd.rs          窗口类注册与窗口过程
+├── backdrop.rs     卡片背景层（分层窗口 + 抗锯齿圆角光栅化）
 ├── automation.rs   客户端窗口自动化（定位 / 填值 / 点击 / 错误判定）
 ├── process.rs      基于 Toolhelp32 快照的进程检测
 ├── settings.rs     注册表读写（QSettings 等价）

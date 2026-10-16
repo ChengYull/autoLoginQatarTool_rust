@@ -7,6 +7,7 @@
 
 mod app;
 mod automation;
+mod backdrop;
 mod gfx;
 mod icon;
 mod model;

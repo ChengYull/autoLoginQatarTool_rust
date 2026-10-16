@@ -111,6 +111,10 @@ const TOGGLE_H: f32 = 26.0;
 const FIELD_PAD_X: f32 = 10.0;
 const EYE_SIZE: f32 = 18.0;
 
+/// 96dpi 下 12px Microsoft YaHei UI 的实测行高（`tmHeight`）。
+/// 只用于在拿不到字体度量的场合兜底（比如只为了算窗口尺寸的那次布局）。
+const BODY_LINE_H_96: f32 = 17.0;
+
 #[derive(Copy, Clone, Debug)]
 pub struct Layout {
     pub scale: f32,
@@ -127,9 +131,12 @@ pub struct Layout {
     pub account_label: Rect,
     pub account_field: Rect,
     pub account_edit: Rect,
+    /// 预览用：和 `account_edit` 里的文字落在同一条基线上的整行矩形
+    pub account_text: Rect,
     pub password_label: Rect,
     pub password_field: Rect,
     pub password_edit: Rect,
+    pub password_text: Rect,
     pub eye: Rect,
     pub reset_btn: Rect,
     pub switch_title: Rect,
@@ -140,9 +147,21 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// 只按缩放因子算布局（字体度量用 96dpi 下的实测值兜底）。
+    /// 仅用于创建窗口前估算尺寸；真正用到的布局请走 [`Layout::compute_with`]。
     pub fn compute(scale: f32) -> Self {
+        Self::compute_with(scale, (BODY_LINE_H_96 * scale).round() as i32)
+    }
+
+    /// `body_line_h` = 正文字体的 `TEXTMETRICW::tmHeight`（物理像素）。
+    ///
+    /// 原生单行 EDIT 把文字**顶对齐**到客户区上沿（基线 = 上沿 + `tmAscent`），
+    /// 不是垂直居中。所以要让框里的字看起来居中，EDIT 的上沿必须摆在
+    /// 「字段中心 − 行高 / 2」的位置 —— 这个位置随字体度量走，不能写死。
+    pub fn compute_with(scale: f32, body_line_h: i32) -> Self {
         let s = |v: f32| (v * scale).round() as i32;
         let r = |x: f32, y: f32, w: f32, h: f32| Rect::new(s(x), s(y), s(w), s(h));
+        let body_h = body_line_h.max(1);
 
         let win_w = CARD_W;
         let win_h = CARD_H;
@@ -182,9 +201,15 @@ impl Layout {
         let account_field = r(inner_x + LABEL_W + LABEL_GAP, y, inner_w - LABEL_W - LABEL_GAP, ROW_H);
         let account_edit = Rect::new(
             account_field.x + s(FIELD_PAD_X),
-            account_field.y + 1,
+            account_field.y + (account_field.h - body_h) / 2,
             account_field.w - s(FIELD_PAD_X) * 2,
-            account_field.h - 2,
+            body_h + s(4.0),
+        );
+        let account_text = Rect::new(
+            account_field.x + s(FIELD_PAD_X),
+            account_field.y,
+            account_field.w - s(FIELD_PAD_X) * 2,
+            account_field.h,
         );
         y += ROW_H + GAP;
 
@@ -204,9 +229,15 @@ impl Layout {
         );
         let password_edit = Rect::new(
             password_field.x + s(FIELD_PAD_X),
-            password_field.y + 1,
+            password_field.y + (password_field.h - body_h) / 2,
             password_field.w - s(FIELD_PAD_X) - s(6.0 + EYE_SIZE + 4.0),
-            password_field.h - 2,
+            body_h + s(4.0),
+        );
+        let password_text = Rect::new(
+            password_field.x + s(FIELD_PAD_X),
+            password_field.y,
+            password_field.w - s(FIELD_PAD_X) - s(6.0 + EYE_SIZE + 4.0),
+            password_field.h,
         );
         y += ROW_H + GAP;
 
@@ -238,9 +269,11 @@ impl Layout {
             account_label,
             account_field,
             account_edit,
+            account_text,
             password_label,
             password_field,
             password_edit,
+            password_text,
             eye,
             reset_btn,
             switch_title,

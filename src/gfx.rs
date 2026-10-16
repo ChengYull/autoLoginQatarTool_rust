@@ -7,9 +7,9 @@
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, DrawTextW, SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, DRAW_TEXT_FORMAT, FONT_QUALITY, HDC, HFONT, HGDIOBJ, OUT_TT_PRECIS,
-    TRANSPARENT,
+    CreateFontW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, ReleaseDC, SelectObject,
+    SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, FONT_QUALITY,
+    HDC, HFONT, HGDIOBJ, OUT_TT_PRECIS, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::Graphics::GdiPlus::*;
 
@@ -347,6 +347,12 @@ pub struct Fonts {
     pub body: HFONT,  // 12px 400
     pub small: HFONT, // 11px 400
     pub badge: HFONT, // 11px 600
+    /// 正文字体的行高（`TEXTMETRICW::tmHeight`）。
+    ///
+    /// 布局需要它：原生单行 EDIT 把文字**顶对齐**到客户区上沿，
+    /// 基线 = 上沿 + `tmAscent`。而 GDI 的 `DT_VCENTER` 是把整个字高盒子
+    /// 垂直居中。两者要落在同一条基线上，就必须知道 `tmHeight`。
+    pub body_line_h: i32,
 }
 
 const FW_NORMAL: i32 = 400;
@@ -355,12 +361,34 @@ const CLEARTYPE_QUALITY_V: FONT_QUALITY = FONT_QUALITY(5);
 
 impl Fonts {
     pub fn new(dpi: u32) -> Self {
+        let body = make_font(12, FW_NORMAL, dpi);
         Self {
             title: make_font(13, FW_SEMIBOLD, dpi),
             label: make_font(12, FW_SEMIBOLD, dpi),
-            body: make_font(12, FW_NORMAL, dpi),
+            body,
             small: make_font(11, FW_NORMAL, dpi),
             badge: make_font(11, FW_SEMIBOLD, dpi),
+            body_line_h: line_height(body),
+        }
+    }
+}
+
+/// 查询字体行高；拿不到就退回 96dpi 下 12px 雅黑实测的 17px
+fn line_height(font: HFONT) -> i32 {
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.0.is_null() {
+            return 17;
+        }
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let mut tm = TEXTMETRICW::default();
+        let ok = GetTextMetricsW(hdc, &mut tm).as_bool() && tm.tmHeight > 0;
+        SelectObject(hdc, old);
+        ReleaseDC(None, hdc);
+        if ok {
+            tm.tmHeight
+        } else {
+            17
         }
     }
 }

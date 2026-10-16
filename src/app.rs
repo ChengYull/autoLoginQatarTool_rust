@@ -17,6 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::automation;
+use crate::backdrop::Backdrop;
 use crate::gfx::{Canvas, Fonts};
 use crate::icon;
 use crate::model::{LoginState, LoginTarget, Widget};
@@ -87,6 +88,10 @@ pub struct App {
     pub layout: Layout,
     pub fonts: Fonts,
 
+    /// 卡片背景层：逐像素 alpha 的分层窗口，永远贴在主窗口正下方，
+    /// 负责抗锯齿的圆角与描边（详见 `backdrop.rs`）。
+    pub backdrop: Option<Backdrop>,
+
     // 子控件
     pub h_account: HWND,
     pub h_password: HWND,
@@ -144,7 +149,9 @@ pub struct App {
 impl App {
     pub fn new(hwnd: HWND, hinst: HINSTANCE, dpi: u32, hicon: HICON) -> Box<Self> {
         let saved = Settings::load();
-        let layout = Layout::compute(dpi as f32 / 96.0);
+        // 字体必须先建：布局里输入框的垂直位置依赖正文字体的行高
+        let fonts = Fonts::new(dpi);
+        let layout = Layout::compute_with(dpi as f32 / 96.0, fonts.body_line_h);
 
         let taskbar_created_msg = {
             let name = to_wide("TaskbarCreated");
@@ -155,7 +162,8 @@ impl App {
             hwnd,
             hinst,
             layout,
-            fonts: Fonts::new(dpi),
+            fonts,
+            backdrop: None,
             h_account: HWND::default(),
             h_password: HWND::default(),
             h_eye: HWND::default(),
@@ -200,12 +208,30 @@ impl App {
         app
     }
 
-    /// WM_CREATE 阶段调用：创建子控件与托盘图标
+    /// WM_CREATE 阶段调用：创建子控件、背景层与托盘图标
     pub fn init_ui(&mut self) {
         self.create_children();
+        self.create_backdrop();
         self.tray.show(self.hicon);
         self.refresh_tray_tip();
         self.update_status_ui();
+    }
+
+    /// 背景层要在主窗口显示之前建好，否则第一帧会先看到没有圆角的方角卡片
+    fn create_backdrop(&mut self) {
+        let size = (self.layout.window.w, self.layout.window.h);
+        self.backdrop = Backdrop::new(self.hinst, self.layout.scale, size);
+        self.sync_backdrop();
+    }
+
+    /// 让背景层跟上主窗口的位置、尺寸、z 序与显隐状态。
+    /// 主窗口每次 `WM_WINDOWPOSCHANGED`（移动 / 缩放 / 显示 / 隐藏 / DPI 变化）都调用一次。
+    pub fn sync_backdrop(&self) {
+        let Some(bd) = self.backdrop.as_ref() else {
+            return;
+        };
+        let visible = unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        bd.sync(self.hwnd, visible);
     }
 
     // -----------------------------------------------------------------------
@@ -336,14 +362,21 @@ impl App {
                     let _ = MoveWindow(hwnd, r.x, r.y, r.w, r.h, true);
                 }
             }
-            // 窗口圆角区域
+            // 主窗口自己的裁剪区域：内缩 2px 的圆角矩形。
+            //
+            // 它的边界必须**完全落在背景层那张白色卡片的内部**，这样两边同色、
+            // 看不见接缝；真正可见的圆角轮廓只剩背景层抗锯齿画出来的那一条。
+            // 区域的硬边是 1 位掩码，必然有台阶，所以绝不能让这条边落在卡片边缘上。
+            // 内缩后圆角半径也要同步减掉内缩量，圆弧才与原卡片同心。
+            let inset = (crate::backdrop::REGION_INSET * l.scale).round() as i32;
+            let radius = ((theme::CARD_RADIUS - crate::backdrop::REGION_INSET) * l.scale).round() as i32;
             let region = CreateRoundRectRgn(
-                0,
-                0,
-                l.window.w + 1,
-                l.window.h + 1,
-                (theme::CARD_RADIUS * l.scale) as i32 * 2,
-                (theme::CARD_RADIUS * l.scale) as i32 * 2,
+                inset,
+                inset,
+                l.window.w - inset + 1,
+                l.window.h - inset + 1,
+                radius * 2,
+                radius * 2,
             );
             let ok = SetWindowRgn(self.hwnd, Some(region), true);
             crate::tlog!("窗口圆角区域设置 -> {}", ok);
@@ -353,7 +386,11 @@ impl App {
     /// 重建字体与布局（DPI 变化时）
     pub fn rebuild_for_dpi(&mut self, dpi: u32) {
         self.fonts = Fonts::new(dpi);
-        self.layout = Layout::compute(dpi as f32 / 96.0);
+        self.layout = Layout::compute_with(dpi as f32 / 96.0, self.fonts.body_line_h);
+        if let Some(bd) = self.backdrop.as_mut() {
+            let size = (self.layout.window.w, self.layout.window.h);
+            bd.rebuild(self.layout.scale, size);
+        }
         unsafe {
             for (hwnd, font) in [
                 (self.h_account, self.fonts.body),
@@ -870,10 +907,15 @@ impl App {
     // -----------------------------------------------------------------------
 
     pub fn show_from_tray(&self) {
+        // 先把背景层亮出来，再显示主窗口：否则第一帧会露出主窗口自己的方角硬边
+        if let Some(bd) = self.backdrop.as_ref() {
+            bd.sync(self.hwnd, true);
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
         }
+        self.sync_backdrop();
     }
 
     /// 关闭按钮 / ✕：保存配置并最小化到托盘（不退出进程）
