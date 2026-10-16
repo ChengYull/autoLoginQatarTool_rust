@@ -6,11 +6,12 @@
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::GdiPlus::*;
 
-use crate::gfx::{Canvas, Fonts};
+use crate::gfx::{text_width, Canvas, Fonts};
 use crate::model::{LoginState, Widget};
 use crate::paint::{paint_all, VisualState};
-use crate::theme::Layout;
+use crate::theme::{self, Layout};
 use crate::util::to_wide;
+use crate::version::{self, VersionState};
 
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
 
@@ -29,9 +30,10 @@ pub struct PreviewCase {
     pub auto_start: bool,
     pub hover: Option<Widget>,
     pub pressed: Option<Widget>,
+    pub version_state: VersionState,
 }
 
-pub const CASES: [PreviewCase; 5] = [
+pub const CASES: [PreviewCase; 6] = [
     PreviewCase {
         name: "01-已停止",
         login_state: LoginState::Stopped,
@@ -41,6 +43,7 @@ pub const CASES: [PreviewCase; 5] = [
         auto_start: false,
         hover: None,
         pressed: None,
+        version_state: VersionState::Latest,
     },
     PreviewCase {
         name: "02-运行中",
@@ -51,6 +54,7 @@ pub const CASES: [PreviewCase; 5] = [
         auto_start: true,
         hover: None,
         pressed: None,
+        version_state: VersionState::Latest,
     },
     PreviewCase {
         name: "03-登录中-密码明文",
@@ -61,6 +65,7 @@ pub const CASES: [PreviewCase; 5] = [
         auto_start: true,
         hover: None,
         pressed: None,
+        version_state: VersionState::Latest,
     },
     PreviewCase {
         name: "04-悬停停止按钮",
@@ -71,6 +76,7 @@ pub const CASES: [PreviewCase; 5] = [
         auto_start: true,
         hover: Some(Widget::Stop),
         pressed: None,
+        version_state: VersionState::Latest,
     },
     PreviewCase {
         name: "05-悬停关闭按钮",
@@ -81,6 +87,20 @@ pub const CASES: [PreviewCase; 5] = [
         auto_start: false,
         hover: Some(Widget::Close),
         pressed: None,
+        version_state: VersionState::Latest,
+    },
+    // 版本徽章的黄色态：绿色那几张已经覆盖了「已是最新」，
+    // 这里专门留一张核对「服务端上有更新版本」的观感
+    PreviewCase {
+        name: "06-版本有更新",
+        login_state: LoginState::Running,
+        account: "10012345",
+        password: "Passw0rd!",
+        password_visible: false,
+        auto_start: true,
+        hover: None,
+        pressed: None,
+        version_state: VersionState::Outdated,
     },
 ];
 
@@ -118,9 +138,15 @@ pub fn render_icon(dir: &str, size: i32) -> Result<String, String> {
     std::result::Result::Ok(path)
 }
 
-pub fn render_case(dir: &str, scale: f32, case: &PreviewCase) -> Result<String, String> {    let dpi = (96.0 * scale).round() as u32;
-    let layout = Layout::compute(scale);
+pub fn render_case(dir: &str, scale: f32, case: &PreviewCase) -> Result<String, String> {
+    let dpi = (96.0 * scale).round() as u32;
     let fonts = Fonts::new(dpi);
+    // 先有字体才量得出文字宽度，版本徽章的位置和宽度都依赖它
+    let mut layout = Layout::compute(scale);
+    layout.place_version_badge(
+        text_width(theme::APP_TITLE, fonts.title),
+        text_width(version::BADGE_TEXT, fonts.badge),
+    );
 
     let path = format!("{}/{}.png", dir.trim_end_matches(['/', '\\']), case.name);
     let wide_path = to_wide(&path);
@@ -164,6 +190,7 @@ pub fn render_case(dir: &str, scale: f32, case: &PreviewCase) -> Result<String, 
                 start_enabled: case.login_state == LoginState::Stopped,
                 stop_enabled: case.login_state != LoginState::Stopped,
                 reset_enabled: true,
+                version_state: case.version_state,
             };
             paint_all(&canvas, &layout, &fonts, &vs, true);
         }

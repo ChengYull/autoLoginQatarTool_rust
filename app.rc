@@ -4,9 +4,11 @@
    源文件由 assets/icons/app.svg 预渲染出的多尺寸 ico（16/20/24/32/40/48/64/128/256）。 */
 1 ICON "assets/icons/app.ico"
 
+/* 版本号由 build.rs 从 Cargo.toml 的 version 注入（见 build.rs）。
+   别在这里硬编码 —— 否则会出现「exe 属性里的版本」和「界面徽章上的版本」不一致。 */
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,0,3,0
-PRODUCTVERSION  1,0,3,0
+FILEVERSION     @VERSION_COMMA@
+PRODUCTVERSION  @VERSION_COMMA@
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0x0L
 FILEOS          VOS_NT_WINDOWS32
@@ -19,11 +21,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Qtech"
             VALUE "FileDescription",  "Qatar / QtPacker 客户端自动登录工具"
-            VALUE "FileVersion",      "1.0.3"
+            VALUE "FileVersion",      "@VERSION_STR@"
             VALUE "InternalName",     "AutoLoginQatarTool"
             VALUE "OriginalFilename", "AutoLoginQatarTool.exe"
             VALUE "ProductName",      "AutoLoginQatarTool"
-            VALUE "ProductVersion",   "1.0.3"
+            VALUE "ProductVersion",   "@VERSION_STR@"
         END
     END
     BLOCK "VarFileInfo"

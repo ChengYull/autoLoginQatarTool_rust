@@ -5,6 +5,7 @@ use crate::icon::{draw_camera, draw_eye};
 use crate::model::{BtnKind, LoginState, Widget};
 use crate::theme::*;
 use crate::util::{Rect, rgb, rgba};
+use crate::version::{self, VersionState};
 
 /// 一次绘制所需的全部视觉状态
 pub struct VisualState<'a> {
@@ -25,6 +26,8 @@ pub struct VisualState<'a> {
     pub start_enabled: bool,
     pub stop_enabled: bool,
     pub reset_enabled: bool,
+    /// 当前版本相对服务端的状态，决定标题栏版本徽章的颜色（绿 = 最新，黄 = 有更新）
+    pub version_state: VersionState,
 }
 
 impl<'a> VisualState<'a> {
@@ -59,7 +62,8 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
 
     // 标题栏
     draw_camera(canvas, l.icon.x, l.icon.y, l.icon.w);
-    canvas.text("自动登录工具", l.title_text, f.title, rgb(TITLE_TEXT), ALIGN_LEFT);
+    canvas.text(APP_TITLE, l.title_text, f.title, rgb(TITLE_TEXT), ALIGN_LEFT);
+    paint_version_badge(canvas, l, f, vs.version_state);
 
     // 运行状态卡片
     paint_status_card(canvas, l, f, vs);
@@ -119,6 +123,24 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     // 启动 / 停止
     paint_button(canvas, f, l.start_btn, BtnKind::Primary, "启动", l.scale, vs.hovered(Widget::Start), vs.pressed(Widget::Start), !vs.start_enabled);
     paint_button(canvas, f, l.stop_btn, BtnKind::Secondary, "停止", l.scale, vs.hovered(Widget::Stop), vs.pressed(Widget::Stop), !vs.stop_enabled);
+}
+
+// ---------------------------------------------------------------------------
+// 版本徽章
+// ---------------------------------------------------------------------------
+
+/// 标题右侧的版本徽章。
+///
+/// 外观与状态卡片里的「运行中」徽章一致（胶囊圆角 + 浅底深字），只用颜色区分新旧：
+/// 绿色 = 当前已是最新，黄色 = 服务端上有更新版本。未摆放时（宽 0）不画。
+fn paint_version_badge(canvas: &Canvas, l: &Layout, f: &Fonts, state: VersionState) {
+    let r = l.version_badge;
+    if r.w <= 0 || r.h <= 0 {
+        return;
+    }
+    let (bg, fg) = state.badge_colors();
+    canvas.fill_round_rect(r, r.h as f32 / 2.0, rgb(bg));
+    canvas.text(version::BADGE_TEXT, r, f.badge, rgb(fg), ALIGN_CENTER);
 }
 
 // ---------------------------------------------------------------------------

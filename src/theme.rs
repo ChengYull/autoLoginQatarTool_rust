@@ -67,6 +67,13 @@ pub const BADGE_HANDLE_FG: u32 = 0xB4_5309;
 pub const BADGE_STOP_BG: u32 = 0xF1_F5F9;
 pub const BADGE_STOP_FG: u32 = 0x64_748B;
 
+// 标题栏的版本徽章：绿色 = 已是最新，黄色 = 服务端上有更新版本。
+// 直接复用上面状态徽章的绿 / 黄，让标题栏和状态卡片是一套配色。
+pub const BADGE_VER_LATEST_BG: u32 = BADGE_RUN_BG;
+pub const BADGE_VER_LATEST_FG: u32 = BADGE_RUN_FG;
+pub const BADGE_VER_OLD_BG: u32 = BADGE_HANDLE_BG;
+pub const BADGE_VER_OLD_FG: u32 = BADGE_HANDLE_FG;
+
 pub const TOGGLE_OFF: u32 = 0xCB_D5E1;
 pub const TOGGLE_ON: u32 = 0x25_63EB;
 pub const TOGGLE_KNOB: u32 = 0xFF_FFFF;
@@ -80,6 +87,14 @@ pub const MENU_SEPARATOR: u32 = 0xEE_F2F7;
 
 /// 相机图标上的多彩光圈（与 app.svg 一致）
 pub const LENS_PETALS: [u32; 6] = [0x46_93E4, 0x7F_D04B, 0x4E_C1C6, 0xA8_D84A, 0x58_A9EA, 0x6C_C9A0];
+
+// ---------------------------------------------------------------------------
+// 文案
+// ---------------------------------------------------------------------------
+
+/// 窗口标题栏上的标题文字。绘制与文字宽度测量都要用它，
+/// 写两处必然会有一天对不上，所以收在这里。
+pub const APP_TITLE: &str = "自动登录工具";
 
 // ---------------------------------------------------------------------------
 // 尺寸（逻辑像素 @96dpi）
@@ -111,6 +126,12 @@ const TOGGLE_H: f32 = 26.0;
 const FIELD_PAD_X: f32 = 10.0;
 const EYE_SIZE: f32 = 18.0;
 
+/// 版本徽章：高度与状态卡片里的「运行中」徽章一致，左右各留 8px 内边距
+const VER_BADGE_H: f32 = 22.0;
+const VER_BADGE_PAD_X: f32 = 8.0;
+/// 版本徽章与标题文字之间的间距
+const VER_BADGE_GAP: f32 = 6.0;
+
 /// 96dpi 下 12px Microsoft YaHei UI 的实测行高（`tmHeight`）。
 /// 只用于在拿不到字体度量的场合兜底（比如只为了算窗口尺寸的那次布局）。
 const BODY_LINE_H_96: f32 = 17.0;
@@ -122,6 +143,9 @@ pub struct Layout {
     pub title_bar: Rect,
     pub icon: Rect,
     pub title_text: Rect,
+    /// 标题右侧的版本徽章。位置与宽度依赖实测文字宽度，
+    /// 由 [`Layout::place_version_badge`] 摆放；在它之前是个空矩形（不绘制）。
+    pub version_badge: Rect,
     pub btn_min: Rect,
     pub btn_close: Rect,
     pub status_card: Rect,
@@ -180,6 +204,8 @@ impl Layout {
             (s(min_x) - icon.right() - s(4.0)).max(0),
             title_bar.h,
         );
+        // 空矩形 = 还没摆。真实位置见 place_version_badge。
+        let version_badge = Rect::new(0, 0, 0, 0);
 
         let inner_x = PAD_X;
         let inner_w = win_w - PAD_X * 2.0;
@@ -260,6 +286,7 @@ impl Layout {
             title_bar,
             icon,
             title_text,
+            version_badge,
             btn_min,
             btn_close,
             status_card,
@@ -282,5 +309,26 @@ impl Layout {
             start_btn,
             stop_btn,
         }
+    }
+
+    /// 摆放标题右侧的版本徽章。
+    ///
+    /// 两个宽度都必须传**实测值**（`gfx::text_width`）：标题文字宽度决定徽章从哪里起，
+    /// 版本文字宽度决定徽章有多宽。两者都随 DPI、字体和版本号位数（`v1.0.1` → `v1.10.2`）
+    /// 变化，按字符数硬算迟早会错位 —— 版本号恰恰是最容易变长的那类文字。
+    ///
+    /// 必须在 [`Fonts`](crate::gfx::Fonts) 建好之后调用（要先有字体才量得出宽度）。
+    pub fn place_version_badge(&mut self, title_w: i32, version_w: i32) {
+        let s = |v: f32| (v * self.scale).round() as i32;
+        let pad = s(VER_BADGE_PAD_X);
+        let h = s(VER_BADGE_H);
+
+        let x = self.title_text.x + title_w.max(0) + s(VER_BADGE_GAP);
+        // 右侧留出到最小化按钮的距离，别压上去
+        let limit = self.btn_min.x - s(VER_BADGE_GAP);
+        let w = (version_w.max(1) + pad * 2).min((limit - x).max(0));
+
+        let y = self.title_bar.y + (self.title_bar.h - h) / 2;
+        self.version_badge = Rect::new(x, y, w, h);
     }
 }

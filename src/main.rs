@@ -20,6 +20,7 @@ mod theme;
 mod trace;
 mod tray;
 mod util;
+mod version;
 mod wnd;
 
 use windows::Win32::Graphics::Gdi::UpdateWindow;
@@ -38,7 +39,7 @@ fn main() {
             .unwrap_or_else(|| "selftest.log".into());
         trace::init(&path);
     }
-    tlog!("main 进入");
+    tlog!("main 进入，版本 v{}", version::APP_VERSION);
 
     app::set_dpi_aware();
     tlog!("DPI 感知已设置");

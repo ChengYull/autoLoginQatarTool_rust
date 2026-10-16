@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::automation;
 use crate::backdrop::Backdrop;
-use crate::gfx::{Canvas, Fonts};
+use crate::gfx::{text_width, Canvas, Fonts};
 use crate::icon;
 use crate::model::{LoginState, LoginTarget, Widget};
 use crate::net::{self, ResetResult};
@@ -28,6 +28,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, Layout};
 use crate::tray::Tray;
 use crate::util::{colorref, from_wide, to_wide, Rect};
+use crate::version::{self, VersionState};
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -39,7 +40,6 @@ pub const TOGGLE_CLASS: &str = "RustAutoLoginToggle";
 pub const EYE_CLASS: &str = "RustAutoLoginEye";
 
 pub const APP_NAME: &str = "AutoLoginQatarTool";
-const APP_TITLE: &str = "自动登录工具";
 
 // 控件 ID
 pub const ID_ACCOUNT: usize = 1001;
@@ -82,6 +82,19 @@ pub const WM_RESET_DONE: u32 = WM_APP + 2;
 // App
 // ---------------------------------------------------------------------------
 
+/// 构建布局：按 DPI 算尺寸之后，还要按**实测文字宽度**摆放标题右侧的版本徽章。
+///
+/// 必须传已经建好的 `fonts` —— 徽章的起点和宽度分别由标题文字、版本文字的实测宽度决定，
+/// 而这两个宽度又随 DPI 变化，所以「先建字体、再算布局」这个顺序不能反。
+fn build_layout(fonts: &Fonts, dpi: u32) -> Layout {
+    let mut layout = Layout::compute_with(dpi as f32 / 96.0, fonts.body_line_h);
+    layout.place_version_badge(
+        text_width(theme::APP_TITLE, fonts.title),
+        text_width(version::BADGE_TEXT, fonts.badge),
+    );
+    layout
+}
+
 pub struct App {
     pub hwnd: HWND,
     pub hinst: HINSTANCE,
@@ -105,6 +118,9 @@ pub struct App {
 
     // 业务状态
     pub login_state: LoginState,
+    /// 当前版本相对服务端的状态（决定标题栏版本徽章的颜色）。
+    /// 自动更新服务端还没接，目前由 [`version::detect_state`] 给初值。
+    pub version_state: VersionState,
     pub active_target: LoginTarget,
     pub account: String,
     pub password: String,
@@ -149,9 +165,10 @@ pub struct App {
 impl App {
     pub fn new(hwnd: HWND, hinst: HINSTANCE, dpi: u32, hicon: HICON) -> Box<Self> {
         let saved = Settings::load();
-        // 字体必须先建：布局里输入框的垂直位置依赖正文字体的行高
+        // 字体必须先建：布局里输入框的垂直位置依赖正文字体的行高，
+        // 版本徽章的摆放还要按实测文字宽度来
         let fonts = Fonts::new(dpi);
-        let layout = Layout::compute_with(dpi as f32 / 96.0, fonts.body_line_h);
+        let layout = build_layout(&fonts, dpi);
 
         let taskbar_created_msg = {
             let name = to_wide("TaskbarCreated");
@@ -174,6 +191,7 @@ impl App {
             h_min: HWND::default(),
             h_close: HWND::default(),
             login_state: LoginState::Stopped,
+            version_state: version::detect_state(),
             active_target: LoginTarget::Qatar,
             account: saved.account,
             password: saved.password,
@@ -386,7 +404,7 @@ impl App {
     /// 重建字体与布局（DPI 变化时）
     pub fn rebuild_for_dpi(&mut self, dpi: u32) {
         self.fonts = Fonts::new(dpi);
-        self.layout = Layout::compute_with(dpi as f32 / 96.0, self.fonts.body_line_h);
+        self.layout = build_layout(&self.fonts, dpi);
         if let Some(bd) = self.backdrop.as_mut() {
             let size = (self.layout.window.w, self.layout.window.h);
             bd.rebuild(self.layout.scale, size);
@@ -433,6 +451,19 @@ impl App {
             start_enabled: self.login_state == LoginState::Stopped,
             stop_enabled: self.login_state != LoginState::Stopped,
             reset_enabled: !self.reset_busy,
+            version_state: self.version_state,
+        }
+    }
+
+    /// 更新版本状态并重绘（有变化才重绘）。
+    ///
+    /// 自动更新的服务端接上后，检查完版本就调这里 —— 界面侧已经全部就位，
+    /// 不需要再改绘制或布局代码。
+    #[allow(dead_code)]
+    pub fn set_version_state(&mut self, state: VersionState) {
+        if self.version_state != state {
+            self.version_state = state;
+            self.repaint();
         }
     }
 
@@ -1106,7 +1137,7 @@ pub fn create_main_window(dpi: u32) -> windows::core::Result<HWND> {
     let y = (screen_h - layout.window.h) / 2;
 
     let class = to_wide(MAIN_CLASS);
-    let title = to_wide(APP_TITLE);
+    let title = to_wide(theme::APP_TITLE);
     unsafe {
         CreateWindowExW(
             WS_EX_APPWINDOW,

@@ -5,11 +5,11 @@
 //! 交替使用同一个 HDC，这是微软文档给出的混用方式。
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, RECT};
+use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, FONT_QUALITY,
-    HDC, HFONT, HGDIOBJ, OUT_TT_PRECIS, TEXTMETRICW, TRANSPARENT,
+    CreateFontW, DeleteObject, DrawTextW, GetDC, GetTextExtentPoint32W, GetTextMetricsW, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DRAW_TEXT_FORMAT, FONT_QUALITY, HDC, HFONT, HGDIOBJ, OUT_TT_PRECIS, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::Graphics::GdiPlus::*;
 
@@ -334,6 +334,33 @@ pub fn draw_text(hdc: HDC, s: &str, r: Rect, font: HFONT, color: u32, flags: u32
         SetTextColor(hdc, COLORREF(colorref(color)));
         DrawTextW(hdc, &mut buf, &mut rc, DRAW_TEXT_FORMAT(flags));
         SelectObject(hdc, old);
+    }
+}
+
+/// 量一段文字在指定字体下的像素宽度（GDI `GetTextExtentPoint32W`）。
+///
+/// 布局需要它：像版本徽章这种「底色包住文字」的元素，宽度必须由文字实际占多宽决定。
+/// 拿不到就返回 0，调用方按自己的兜底处理。
+pub fn text_width(s: &str, font: HFONT) -> i32 {
+    if s.is_empty() {
+        return 0;
+    }
+    unsafe {
+        let hdc = GetDC(None);
+        if hdc.0.is_null() {
+            return 0;
+        }
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let buf: Vec<u16> = s.encode_utf16().collect();
+        let mut size = SIZE::default();
+        let ok = GetTextExtentPoint32W(hdc, &buf, &mut size).as_bool();
+        SelectObject(hdc, old);
+        ReleaseDC(None, hdc);
+        if ok {
+            size.cx
+        } else {
+            0
+        }
     }
 }
 
