@@ -437,11 +437,13 @@ fn download(
         return 500;
     }
 
+    // 下载文件名带完整产品名：网页上点按钮下载时，浏览器会用这个名字存盘。
+    // 只写版本号的话用户拿到的是 "1.0.4.exe"，放进下载目录根本认不出来。
     let header = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
          Content-Length: {size}\r\n\
-         Content-Disposition: attachment; filename=\"{version}.exe\"\r\n\
+         Content-Disposition: attachment; filename=\"AutoLoginQatarTool-{version}.exe\"\r\n\
          Connection: close\r\n\
          \r\n"
     );
