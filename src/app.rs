@@ -58,6 +58,8 @@ pub const IDM_STATUS: usize = 2001;
 pub const IDM_TOGGLE: usize = 2002;
 pub const IDM_SHOW: usize = 2003;
 pub const IDM_EXIT: usize = 2004;
+/// 「检查更新」：托盘菜单和版本徽章的右键菜单共用同一个命令 ID
+pub const IDM_CHECK_UPDATE: usize = 2005;
 
 // 定时器
 const TIMER_POLL: usize = 1;
@@ -168,6 +170,8 @@ pub struct App {
     pub badge_hover: bool,
     /// 更新包下载的结果回传通道
     install_rx: Option<mpsc::Receiver<Result<update::StagedUpdate, String>>>,
+    /// 本次检查是用户手动触发的（托盘 / 徽章右键），结果要给他明确反馈
+    manual_check: bool,
 
     // 画刷
     pub brush_white: HBRUSH,
@@ -235,6 +239,7 @@ impl App {
             updating: false,
             badge_hover: false,
             install_rx: None,
+            manual_check: false,
             reset_busy: false,
             brush_white: unsafe { CreateSolidBrush(COLORREF(colorref(theme::INPUT_BG))) },
             brush_disabled: unsafe {
@@ -537,6 +542,8 @@ impl App {
         let Ok(outcome) = rx.try_recv() else {
             return;
         };
+        let manual = std::mem::replace(&mut self.manual_check, false);
+
         if !outcome.latest.is_empty() {
             // 说明可能多行，落进日志前压成一行并截断
             let notes: String = outcome.notes.replace(['\r', '\n'], " ").chars().take(60).collect();
@@ -548,9 +555,75 @@ impl App {
                 notes
             );
         }
+
+        // latest 为空 = 没连上服务端（check() 里任何失败都返回 unknown）
+        let reachable = !outcome.latest.is_empty();
         let state = outcome.state;
         self.update_info = Some(outcome);
         self.set_version_state(state);
+
+        if !manual {
+            return; // 定时检查：静默，只靠徽章颜色表达
+        }
+        if !reachable {
+            self.warning_box(
+                "检查更新",
+                "无法连接到更新服务端。\n请检查网络，或确认服务端地址配置正确。",
+            );
+        } else if state == VersionState::Outdated {
+            // 有新版本：直接进更新确认框，省得用户再点一次徽章
+            self.on_update_click();
+        } else {
+            self.info_box(
+                "检查更新",
+                &format!("当前已是最新版本 v{}", version::APP_VERSION),
+            );
+        }
+    }
+
+    /// 手动检查更新（托盘菜单 / 徽章右键）。跟定时检查共用同一条链路，
+    /// 区别只在于结果要弹框告诉用户 —— 不然点了菜单什么都没发生，很懵。
+    pub fn check_update_manually(&mut self) {
+        if self.update_rx.is_some() {
+            self.info_box("检查更新", "正在检查中，请稍候…");
+            return;
+        }
+        self.manual_check = true;
+        self.start_update_check();
+    }
+
+    /// 版本徽章右键：弹一个只有「检查更新」的小菜单
+    pub fn show_badge_menu(&mut self) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+            let label = to_wide("检查更新");
+            let _ = AppendMenuW(menu, MF_STRING, IDM_CHECK_UPDATE, PCWSTR(label.as_ptr()));
+
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_err() {
+                let _ = DestroyMenu(menu);
+                return;
+            }
+            // 弹出前抢前台，否则点别处菜单不会消失
+            let _ = SetForegroundWindow(self.hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                pt.x,
+                pt.y,
+                None,
+                self.hwnd,
+                None,
+            );
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+
+            if cmd.0 as usize == IDM_CHECK_UPDATE {
+                self.check_update_manually();
+            }
+        }
     }
 
     /// 版本徽章是否可点（有新版本、且当前没在更新）

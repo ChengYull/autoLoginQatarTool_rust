@@ -9,7 +9,7 @@ use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABL
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{IDM_EXIT, IDM_SHOW, IDM_STATUS, IDM_TOGGLE, WM_TRAY};
+use crate::app::{IDM_CHECK_UPDATE, IDM_EXIT, IDM_SHOW, IDM_STATUS, IDM_TOGGLE, WM_TRAY};
 use crate::gfx::{draw_text, Canvas, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER};
 use crate::theme;
 use crate::util::{colorref, from_wide, to_wide, Rect};
@@ -73,6 +73,7 @@ impl Tray {
             let _ = AppendMenuW(menu, MF_OWNERDRAW | MF_DISABLED, 0, PCWSTR(std::ptr::null()));
             let _ = AppendMenuW(menu, MF_OWNERDRAW, IDM_TOGGLE, PCWSTR(IDM_TOGGLE as *const u16));
             let _ = AppendMenuW(menu, MF_OWNERDRAW | MF_DISABLED, 0, PCWSTR(std::ptr::null()));
+            let _ = AppendMenuW(menu, MF_OWNERDRAW, IDM_CHECK_UPDATE, PCWSTR(IDM_CHECK_UPDATE as *const u16));
             let _ = AppendMenuW(menu, MF_OWNERDRAW, IDM_SHOW, PCWSTR(IDM_SHOW as *const u16));
             let _ = AppendMenuW(menu, MF_OWNERDRAW, IDM_EXIT, PCWSTR(IDM_EXIT as *const u16));
         }
@@ -168,6 +169,7 @@ impl Tray {
                     "启动".into()
                 }
             }
+            IDM_CHECK_UPDATE => "检查更新".into(),
             IDM_SHOW => "显示主界面".into(),
             IDM_EXIT => "退出".into(),
             _ => String::new(),

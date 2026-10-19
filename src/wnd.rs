@@ -167,7 +167,14 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             if let Some(app) = app {
                 // 标题栏区域交给系统做原生拖动（含 Aero Snap）
                 if app.layout.title_bar.contains(pt.x, pt.y) {
-                    return LRESULT(HTCAPTION as isize);
+                    // 但版本徽章在标题栏里面：它可点时必须返回 HTCLIENT，
+                    // 否则系统会把这个位置当成标题栏，鼠标按下直接变成拖动窗口，
+                    // WM_LBUTTONDOWN 根本不会发过来 —— 表现就是"点徽章没反应"。
+                    let on_clickable_badge = app.layout.version_badge.contains(pt.x, pt.y)
+                        && app.badge_clickable();
+                    if !on_clickable_badge {
+                        return LRESULT(HTCAPTION as isize);
+                    }
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -232,6 +239,19 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                     let _ = SetFocus(Some(app.h_account));
                 } else if app.layout.password_field.contains(x, y) {
                     let _ = SetFocus(Some(app.h_password));
+                }
+            }
+            LRESULT(0)
+        }
+
+        // 版本徽章右键：弹出「检查更新」。绿徽章也允许右击 —— 想主动查一下是正常需求，
+        // 不该只在"已经知道有更新"时才给这个入口。
+        WM_RBUTTONUP => {
+            if let Some(app) = app {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if app.layout.version_badge.contains(x, y) {
+                    app.show_badge_menu();
                 }
             }
             LRESULT(0)
@@ -346,6 +366,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                         let cmd = app.tray.popup();
                         match cmd {
                             app::IDM_TOGGLE => app.tray_toggle(),
+                            app::IDM_CHECK_UPDATE => app.check_update_manually(),
                             app::IDM_SHOW => app.show_from_tray(),
                             app::IDM_EXIT => app.on_exit(),
                             _ => {}
