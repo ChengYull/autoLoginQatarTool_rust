@@ -101,6 +101,26 @@ pub struct StagedUpdate {
 /// 校验是必须的：更新流程下一步就是拿这个文件覆盖自己的 exe，
 /// 万一下载到的是错误页或者半截文件，程序就再也起不来了。
 pub fn download(latest: &str, expect_size: u64) -> Result<StagedUpdate, String> {
+    // 传输中断是真实存在的（超时、连接被重置、网络抖动），而这里失败一次
+    // 就意味着用户看到"下载失败"弹框、还得自己再点一次。重试两轮能挡掉绝大多数偶发。
+    const ATTEMPTS: u32 = 3;
+    let mut last_err = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match download_once(latest, expect_size) {
+            Ok(staged) => return Ok(staged),
+            Err(err) => {
+                crate::tlog!("下载 v{latest} 第 {attempt}/{ATTEMPTS} 次失败：{err}");
+                last_err = err;
+                if attempt < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                }
+            }
+        }
+    }
+    Err(format!("重试 {ATTEMPTS} 次仍失败：{last_err}"))
+}
+
+fn download_once(latest: &str, expect_size: u64) -> Result<StagedUpdate, String> {
     let (host, port) = endpoint();
     let path = format!("/api/download/{latest}");
     let dest = std::env::temp_dir().join(format!("AutoLoginQatarTool-{latest}.new.exe"));

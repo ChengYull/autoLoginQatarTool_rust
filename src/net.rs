@@ -25,6 +25,9 @@ const DEFAULT_HOST: &str = "10.170.1.137";
 const DEFAULT_PORT: u16 = 18081;
 const PATH: &str = "/api/user/forgetpwd";
 const TIMEOUT_MS: i32 = 10_000;
+/// 下载产物用的超时。这个值是「两次收到数据之间的最大间隔」，
+/// 传几百 KB 时网络稍微顿一下就会被 10 秒的默认值误判成超时。
+const DOWNLOAD_TIMEOUT_MS: i32 = 60_000;
 
 /// 重置密码接口地址。允许用环境变量覆盖，便于自测与灰度（默认走生产地址）。
 fn reset_endpoint() -> (String, u16) {
@@ -64,9 +67,9 @@ fn http_get(path_and_query: &str) -> Result<String, String> {
 /// 同步阻塞调用，调用方负责放到后台线程里跑。
 pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<String, String> {
     let mut body: Vec<u8> = Vec::new();
-    http_fetch(host_name, port, path_and_query, &mut |chunk| {
+    http_fetch(host_name, port, path_and_query, TIMEOUT_MS, &mut |chunk| {
         body.extend_from_slice(chunk);
-        true
+        Ok(())
     })?;
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
@@ -82,23 +85,28 @@ pub fn http_download_to(
 ) -> Result<u64, String> {
     let mut file = File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
     let mut written: u64 = 0;
-    http_fetch(host_name, port, path_and_query, &mut |chunk| {
-        if file.write_all(chunk).is_err() {
-            return false;
-        }
+    // 下载用更长的超时：`WinHttpSetTimeouts` 的最后一个是「两次收到数据之间的最大间隔」，
+    // 查版本接口 10 秒足够，但传几百 KB 时网络稍微顿一下就会误判成超时。
+    http_fetch(host_name, port, path_and_query, DOWNLOAD_TIMEOUT_MS, &mut |chunk| {
+        file.write_all(chunk)
+            .map_err(|e| format!("写入本地文件失败：{e}"))?;
         written += chunk.len() as u64;
-        true
+        Ok(())
     })?;
     let _ = file.flush();
     Ok(written)
 }
 
-/// 发一个明文 HTTP GET，把响应体逐块交给 `on_chunk`（返回 false 表示中止）。
+/// 发一个明文 HTTP GET，把响应体逐块交给 `on_chunk`。
+///
+/// **出错必须返回 Err，不能静默 break** —— 下载更新包时「少收了几个字节」和
+/// 「传完了」的区别，就是「把自己替换成半截 exe」和「正常升级」的区别。
 fn http_fetch(
     host_name: &str,
     port: u16,
     path_and_query: &str,
-    on_chunk: &mut dyn FnMut(&[u8]) -> bool,
+    timeout_ms: i32,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
     unsafe {
         let agent = to_wide("AutoLoginQatarTool");
@@ -115,7 +123,7 @@ fn http_fetch(
         // 句柄守卫活到函数结束，任意返回路径上都会释放（drop 顺序与创建顺序相反）
         let _session = HandleGuard(session);
 
-        let _ = WinHttpSetTimeouts(session, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS);
+        let _ = WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
         let host = to_wide(host_name);
         let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), port, 0);
@@ -166,30 +174,24 @@ fn http_fetch(
         let mut buffer = [0u8; 64 * 1024];
         loop {
             let mut available: u32 = 0;
-            if WinHttpQueryDataAvailable(request, &mut available).is_err() {
-                break;
-            }
+            WinHttpQueryDataAvailable(request, &mut available)
+                .map_err(|e| format!("读取响应失败（可能超时）：{}", e.message()))?;
             if available == 0 {
-                break;
+                break; // 数据读完，正常结束
             }
             let to_read = available.min(buffer.len() as u32);
             let mut read: u32 = 0;
-            if WinHttpReadData(
+            WinHttpReadData(
                 request,
                 buffer.as_mut_ptr() as *mut c_void,
                 to_read,
                 &mut read,
             )
-            .is_err()
-            {
-                break;
-            }
+            .map_err(|e| format!("读取响应数据失败：{}", e.message()))?;
             if read == 0 {
                 break;
             }
-            if !on_chunk(&buffer[..read as usize]) {
-                break;
-            }
+            on_chunk(&buffer[..read as usize])?;
         }
         Ok(())
     }
