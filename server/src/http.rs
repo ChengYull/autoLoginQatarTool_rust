@@ -126,6 +126,17 @@ impl Server {
             while !stop_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, peer)) => {
+                        // **关键：Windows 上 accept 返回的 socket 会继承 listener 的非阻塞属性**
+                        // （Linux 不会继承）。我们为了让 accept 循环能被停止标志叫停，
+                        // 把 listener 设成了非阻塞 —— 结果每条连接也成了非阻塞的：
+                        // `write_all` 一碰到发送缓冲区满就返回 WouldBlock(10035) 而不是等待，
+                        // 几百 KB 的文件必然在 64KB（发送缓冲区大小）处断掉。
+                        // 跨网络时缓冲区很容易满，所以表现得像"必现"；本机回环太快，
+                        // 缓冲区从不满，所以本地测试一直是对的 —— 这就是为什么查了这么久。
+                        // 另外非阻塞模式下 set_read_timeout / set_write_timeout 也是无效的。
+                        if let Err(err) = stream.set_nonblocking(false) {
+                            crate::tlog!("切换阻塞模式失败：{err}");
+                        }
                         let shared = shared.clone();
                         std::thread::spawn(move || {
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
