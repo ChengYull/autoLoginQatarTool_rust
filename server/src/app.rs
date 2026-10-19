@@ -532,6 +532,17 @@ impl App {
         match Server::start(&bind, self.shared.clone()) {
             Ok(server) => {
                 crate::tlog!("服务已启动，监听 {}", server.addr());
+                // 落一条到日志文件：排查时第一件事就是确认"对方跑的是哪个版本"
+                self.shared.push_log(
+                    "本机".into(),
+                    format!(
+                        "服务端启动 v{}，监听 {}，数据目录 {}",
+                        theme::APP_VERSION,
+                        server.addr(),
+                        self.data_dir.display()
+                    ),
+                    200,
+                );
                 self.config.bind = bind;
                 if let Err(err) = self.config.save(&self.data_dir) {
                     crate::tlog!("保存配置失败：{err}");

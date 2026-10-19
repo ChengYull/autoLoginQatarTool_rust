@@ -9,7 +9,7 @@
 //! 固定几个路由。任何超出这个范围的东西都直接 404 / 405。
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -33,11 +33,16 @@ pub struct LogEntry {
     pub status: u16,
 }
 
+/// 日志文件名（放在数据目录下，方便「打开数据目录」直接取）
+pub const LOG_FILE: &str = "server.log";
+
 /// 服务端与请求处理线程共享的状态
 pub struct Shared {
     pub repo: Mutex<Repo>,
     pub data_dir: PathBuf,
     pub logs: Mutex<VecDeque<LogEntry>>,
+    /// 落盘日志。界面只显示最近几十条且会被截断，出问题时要能拿到完整记录。
+    log_file: Mutex<Option<File>>,
     /// 累计请求数（含失败）
     pub hits: AtomicU64,
     /// 累计下载次数
@@ -46,19 +51,37 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(data_dir: PathBuf, repo: Repo) -> Arc<Self> {
+        // 追加模式：服务端重启不清空历史，方便对照「上一次是怎么坏的」
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join(LOG_FILE))
+            .ok();
+
         Arc::new(Self {
             repo: Mutex::new(repo),
             data_dir,
             logs: Mutex::new(VecDeque::new()),
+            log_file: Mutex::new(log_file),
             hits: AtomicU64::new(0),
             downloads: AtomicU64::new(0),
         })
     }
 
     pub fn push_log(&self, peer: String, line: String, status: u16) {
+        let time = store::now_string();
+
+        // 先落盘（完整、不截断），再放进界面用的环形缓冲
+        if let Ok(mut guard) = self.log_file.lock() {
+            if let Some(file) = guard.as_mut() {
+                let _ = writeln!(file, "{time} [{status}] {peer}  {line}");
+                let _ = file.flush();
+            }
+        }
+
         if let Ok(mut logs) = self.logs.lock() {
             logs.push_front(LogEntry {
-                time: store::now_string(),
+                time,
                 peer,
                 line,
                 status,
@@ -429,13 +452,23 @@ fn download(
             Ok(0) => break,
             Ok(n) => {
                 if let Err(e) = stream.write_all(&buf[..n]) {
-                    abort = Some(format!("发送失败：{e}"));
+                    // 错误码很关键：10054=对端重置，10053=本机中止，10060=超时。
+                    // 光写「发送失败」等于没说，三种原因的处理方式完全不同。
+                    abort = Some(format!(
+                        "发送失败：{e}（kind={:?}, os={:?}）",
+                        e.kind(),
+                        e.raw_os_error()
+                    ));
                     break;
                 }
                 sent += n as u64;
             }
             Err(e) => {
-                abort = Some(format!("读取产物失败：{e}"));
+                abort = Some(format!(
+                    "读取产物失败：{e}（kind={:?}, os={:?}）",
+                    e.kind(),
+                    e.raw_os_error()
+                ));
                 break;
             }
         }
