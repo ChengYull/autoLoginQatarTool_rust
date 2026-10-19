@@ -304,7 +304,7 @@ fn version_json(shared: &Arc<Shared>, current: &str) -> Vec<u8> {
 
 /// 下载某个版本的产物，流式写出（不把整个 exe 读进内存）
 fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_only: bool) -> u16 {
-    let path = {
+    let (path, recorded_size) = {
         let Ok(mut repo) = shared.repo.lock() else {
             let _ = write_simple(stream, 500, "text/plain; charset=utf-8", "内部错误".as_bytes());
             return 500;
@@ -315,8 +315,8 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
             .releases
             .iter()
             .find(|r| r.version == version)
-            .map(|r| r.file.clone());
-        let Some(file_name) = found else {
+            .map(|r| (r.file.clone(), r.size));
+        let Some((file_name, recorded_size)) = found else {
             drop(repo);
             let _ = write_simple(
                 stream,
@@ -336,7 +336,10 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
         if let Some(r) = repo.releases.iter_mut().find(|r| r.version == version) {
             r.downloads += 1;
         }
-        shared.data_dir.join(store::FILES_DIR).join(file_name)
+        (
+            shared.data_dir.join(store::FILES_DIR).join(file_name),
+            recorded_size,
+        )
     };
 
     shared.downloads.fetch_add(1, Ordering::Relaxed);
@@ -371,6 +374,22 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
             return 500;
         }
     };
+
+    // 磁盘文件必须和仓库记录的大小一致。不一致说明文件被拷坏了 / 拷贝中断了 /
+    // 只替换了一半 —— 这种时候**宁可拒绝，也不能把半截 exe 发出去**：
+    // 客户端拿到半截文件后可能会拿它覆盖自己，程序就再也起不来了。
+    if recorded_size > 0 && size != recorded_size {
+        let _ = write_simple(
+            stream,
+            500,
+            "text/plain; charset=utf-8",
+            format!(
+                "产物文件损坏：磁盘上 {size} 字节，记录应为 {recorded_size} 字节。请在服务端重新发布该版本。"
+            )
+            .as_bytes(),
+        );
+        return 500;
+    }
 
     let header = format!(
         "HTTP/1.1 200 OK\r\n\

@@ -168,7 +168,27 @@ fn http_fetch(
         )
         .map_err(|e| format!("读取响应状态码失败：{}", e.message()))?;
         if status != 200 {
-            return Err(format!("服务端返回 HTTP {status}"));
+            // 服务端会在响应体里写清楚原因（比如「产物文件损坏：磁盘上 65536 字节」），
+            // 把它带出来 —— 只说"HTTP 500"等于让用户干瞪眼。
+            let mut detail = String::new();
+            let mut buf = [0u8; 512];
+            let mut read: u32 = 0;
+            if WinHttpReadData(
+                request,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                &mut read,
+            )
+            .is_ok()
+                && read > 0
+            {
+                detail = String::from_utf8_lossy(&buf[..read as usize]).trim().to_string();
+            }
+            return Err(if detail.is_empty() {
+                format!("服务端返回 HTTP {status}")
+            } else {
+                format!("服务端返回 HTTP {status}：{detail}")
+            });
         }
 
         let mut buffer = [0u8; 64 * 1024];
