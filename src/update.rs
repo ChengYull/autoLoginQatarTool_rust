@@ -6,8 +6,8 @@
 use crate::net;
 use crate::version::{self, VersionState};
 
-/// 默认服务端地址（与重置密码接口同一台机器，不同端口）
-const DEFAULT_HOST: &str = "10.170.1.137";
+/// 默认更新服务端地址
+const DEFAULT_HOST: &str = "10.170.108.115";
 const DEFAULT_PORT: u16 = 18082;
 
 /// 重新检查的间隔（6 小时）。程序常驻托盘可能跑很久，只在启动时查一次不够。

@@ -1,6 +1,6 @@
 [package]
 name = "auto-login-qatar-tool"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Qatar / QtPacker 客户端自动登录工具（Rust 复刻版）"
 build = "build.rs"

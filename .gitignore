@@ -10,5 +10,11 @@
 /server/.preview/
 /server/.testdata/
 
+# 从 dist/ 直接启动服务端时产生的运行时数据（发布过的产物、访问统计、本机配置）
+/dist/data/
+
+# 手动留的旧版备份（dist 里只提交当前版本）
+/dist/AutoLoginQatarTool v*.exe
+
 # AI 助手的工作记录（不属于项目源码）
 /.workbuddy-ai/
