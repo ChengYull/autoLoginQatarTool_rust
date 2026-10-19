@@ -6,7 +6,7 @@ description = "AutoLoginQatarTool 更新服务端：版本发布与分发，带�
 build = "build.rs"
 
 [[bin]]
-name = "AutoLoginQatarServer"
+name = "AutoLoginServer"
 path = "src/main.rs"
 
 [dependencies]

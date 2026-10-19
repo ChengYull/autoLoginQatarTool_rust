@@ -9,7 +9,7 @@ use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{self, App, BTN_CLASS, MAIN_CLASS};
+use crate::app::{self, App, BTN_CLASS, MAIN_CLASS, WM_START_SERVER};
 use crate::icon;
 use crate::model::Widget;
 use crate::theme;
@@ -284,6 +284,14 @@ unsafe extern "system" fn main_wndproc(
 
         WM_DESTROY => {
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+
+        WM_START_SERVER => {
+            // 窗口已经显示出来了，这时候再启动监听（失败时的错误框才有正常的落点）
+            if let Some(app) = app {
+                app.start_server();
+            }
             LRESULT(0)
         }
 

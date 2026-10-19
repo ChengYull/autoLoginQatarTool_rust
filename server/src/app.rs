@@ -47,6 +47,9 @@ pub const ID_CLOSE: usize = 1009;
 const TIMER_REFRESH: usize = 1;
 const REFRESH_INTERVAL_MS: u32 = 1000;
 
+/// 自定义消息：窗口显示之后再启动监听
+pub const WM_START_SERVER: u32 = WM_APP + 1;
+
 /// 数据目录。进程内只有一个主窗口，用全局量传比往 `CreateWindowExW` 的
 /// `lpParam` 里塞裸指针安全 —— 后者指向栈上局部变量，函数一返回就悬空了。
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -154,8 +157,12 @@ impl App {
         self.update_enabled();
         // 打开界面就把服务拉起来：这是个"双击就该开始工作"的工具，
         // 让用户再点一次「启动」是多余的一步。
-        self.start_server();
+        //
+        // 但要用 PostMessage 延后到窗口显示之后再启动：WM_CREATE 时窗口还没
+        // ShowWindow，万一端口被占用要弹错误框，挂在一个不可见的 owner 上
+        // 会跑到屏幕角落去，看着像卡住了。
         unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_START_SERVER, WPARAM(0), LPARAM(0));
             let _ = SetTimer(Some(self.hwnd), TIMER_REFRESH, REFRESH_INTERVAL_MS, None);
         }
     }
@@ -533,6 +540,7 @@ impl App {
                 self.set_addr_text(&self.config.bind.clone());
             }
             Err(err) => {
+                crate::tlog!("服务启动失败：{err}");
                 self.error_box("启动失败", &err);
             }
         }
@@ -696,17 +704,30 @@ impl App {
     pub fn on_timer(&mut self) {
         let hits = self.shared.hits.load(std::sync::atomic::Ordering::Relaxed);
         let logs = self.shared.snapshot_logs().len();
-        if hits != self.last_hits || logs != self.last_logs {
-            self.last_hits = hits;
-            self.last_logs = logs;
-            // 仓库里的下载计数也可能被 HTTP 线程改过，跟着回读一次
-            if let Ok(repo) = self.shared.repo.lock() {
-                if repo.releases.len() == self.repo.releases.len() {
-                    self.repo = repo.clone();
+        if hits == self.last_hits && logs == self.last_logs {
+            return;
+        }
+        self.last_hits = hits;
+        self.last_logs = logs;
+
+        // HTTP 线程只改内存里的下载计数，落盘由这里负责（见 http.rs 里的说明）。
+        // 长度不同说明界面这边刚改过仓库、还没同步过去，别拿旧的回读覆盖它。
+        if let Ok(repo) = self.shared.repo.lock() {
+            if repo.releases.len() == self.repo.releases.len() {
+                let counts_changed = repo
+                    .releases
+                    .iter()
+                    .zip(self.repo.releases.iter())
+                    .any(|(live, mine)| live.downloads != mine.downloads);
+                self.repo = repo.clone();
+                if counts_changed {
+                    if let Err(err) = self.repo.save(&self.data_dir) {
+                        crate::tlog!("保存下载计数失败：{err}");
+                    }
                 }
             }
-            self.repaint();
         }
+        self.repaint();
     }
 
     // -----------------------------------------------------------------------

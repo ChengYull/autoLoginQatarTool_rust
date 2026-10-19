@@ -318,11 +318,16 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
             );
             return 404;
         };
-        // 计数在这里加：能走到这一步说明版本存在，下载是"真的发生了"
+        // 计数在这里加：能走到这一步说明版本存在，下载是"真的发生了"。
+        //
+        // **但只改内存，不落盘** —— 磁盘写入统一由界面线程负责。
+        // 这里 save 会和「界面正在发布」撞车：界面先 add 再 save，中间还有个
+        // sync_shared_repo 的窗口期，此刻 HTTP 线程手里是不含新版本的旧仓库，
+        // 它一 save 就把刚发布的版本从 releases.json 里抹掉了。
+        // 界面线程的定时器会把计数回读并落盘，最坏只丢一秒的计数，不会丢版本。
         if let Some(r) = repo.releases.iter_mut().find(|r| r.version == version) {
             r.downloads += 1;
         }
-        let _ = repo.save(&shared.data_dir);
         (shared.data_dir.join(store::FILES_DIR).join(file_name), size)
     };
 
