@@ -55,7 +55,7 @@ impl Shared {
         })
     }
 
-    fn push_log(&self, peer: String, line: String, status: u16) {
+    pub fn push_log(&self, peer: String, line: String, status: u16) {
         if let Ok(mut logs) = self.logs.lock() {
             logs.push_front(LogEntry {
                 time: store::now_string(),
@@ -167,7 +167,7 @@ fn handle_connection(mut stream: TcpStream, peer: String, shared: &Arc<Shared>) 
     }
 
     shared.hits.fetch_add(1, Ordering::Relaxed);
-    let status = route(&mut stream, &request, shared, head_only);
+    let status = route(&mut stream, &request, shared, head_only, &peer);
     shared.push_log(peer, log_line, status);
 }
 
@@ -228,7 +228,13 @@ fn read_request(stream: &TcpStream) -> Result<Request, String> {
 }
 
 /// 返回 HTTP 状态码（用于访问日志）
-fn route(stream: &mut TcpStream, req: &Request, shared: &Arc<Shared>, head_only: bool) -> u16 {
+fn route(
+    stream: &mut TcpStream,
+    req: &Request,
+    shared: &Arc<Shared>,
+    head_only: bool,
+    peer: &str,
+) -> u16 {
     let path = req.path.trim_end_matches('/');
     let path = if path.is_empty() { "/" } else { path };
 
@@ -246,7 +252,7 @@ fn route(stream: &mut TcpStream, req: &Request, shared: &Arc<Shared>, head_only:
         }
         _ if path.starts_with("/api/download/") => {
             let version = path.trim_start_matches("/api/download/");
-            download(stream, version, shared, head_only)
+            download(stream, version, shared, head_only, peer)
         }
         _ => {
             let _ = write_simple(
@@ -303,7 +309,13 @@ fn version_json(shared: &Arc<Shared>, current: &str) -> Vec<u8> {
 }
 
 /// 下载某个版本的产物，流式写出（不把整个 exe 读进内存）
-fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_only: bool) -> u16 {
+fn download(
+    stream: &mut TcpStream,
+    version: &str,
+    shared: &Arc<Shared>,
+    head_only: bool,
+    peer: &str,
+) -> u16 {
     let (path, recorded_size) = {
         let Ok(mut repo) = shared.repo.lock() else {
             let _ = write_simple(stream, 500, "text/plain; charset=utf-8", "内部错误".as_bytes());
@@ -406,20 +418,44 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
         return 200;
     }
 
-    // 64KB 一块往前推，边读边写
+    // 64KB 一块往前推，边读边写。
+    // 中断原因一定要记下来 —— 以前这里是 `if ...is_err() { break; }`，
+    // 断了就断了，界面上只看到一条 200，完全不知道发到哪、为什么停。
     let mut buf = vec![0u8; 64 * 1024];
+    let mut sent: u64 = 0;
+    let mut abort: Option<String> = None;
     loop {
         match file.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if stream.write_all(&buf[..n]).is_err() {
+                if let Err(e) = stream.write_all(&buf[..n]) {
+                    abort = Some(format!("发送失败：{e}"));
                     break;
                 }
+                sent += n as u64;
             }
-            Err(_) => break,
+            Err(e) => {
+                abort = Some(format!("读取产物失败：{e}"));
+                break;
+            }
         }
     }
     let _ = stream.flush();
+
+    if sent != size || abort.is_some() {
+        // 正常下载不记（避免刷屏），只有没发全才记一条到界面日志
+        shared.push_log(
+            peer.to_string(),
+            format!(
+                "下载 {version} 中断：已发 {sent}/{size} 字节{}",
+                abort
+                    .as_deref()
+                    .map(|r| format!("（{r}）"))
+                    .unwrap_or_default()
+            ),
+            500,
+        );
+    }
     200
 }
 
