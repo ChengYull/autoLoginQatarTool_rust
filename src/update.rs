@@ -139,6 +139,21 @@ fn download_once(latest: &str, expect_size: u64) -> Result<StagedUpdate, String>
         return Err(format!("下载内容不是可执行文件（{written} 字节），已丢弃"));
     }
 
+    // 最后一道校验：新包自己的版本号必须等于目标版本。
+    // 截断的 exe 读不出完整版本资源，放错的文件版本号也对不上 ——
+    // 这两种情况如果放过去，下一步就是拿它覆盖自己，程序就再也起不来了。
+    match version::read_exe_version(&dest) {
+        Ok(found) if found == latest => {}
+        Ok(found) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(format!("下载到的文件版本是 v{found}，与目标 v{latest} 不符，已丢弃"));
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(format!("下载到的文件无法读取版本号（可能不完整）：{err}"));
+        }
+    }
+
     Ok(StagedUpdate {
         version: latest.to_string(),
         path: dest,

@@ -283,13 +283,20 @@ fn version_json(shared: &Arc<Shared>, current: &str) -> Vec<u8> {
         store::compare_version(&latest.version, current) == std::cmp::Ordering::Greater
     };
 
+    // size 同样以磁盘上的实际文件为准。内存里的是"发布那一刻"的快照，
+    // 文件后来被重新发布/手工替换过的话就会过期 —— 客户端拿它做下载校验，
+    // 一旦偏小，截断的 exe 反而能通过校验（见 download() 里的说明）。
+    let size = std::fs::metadata(shared.data_dir.join(store::FILES_DIR).join(&latest.file))
+        .map(|m| m.len())
+        .unwrap_or(latest.size);
+
     let payload = serde_json::json!({
         "update": has_update,
         "latest": latest.version,
         "notes": latest.notes,
         "force": latest.force,
         "url": format!("/api/download/{}", latest.version),
-        "size": latest.size,
+        "size": size,
         "published_at": latest.published_at,
     });
     serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec())
@@ -297,18 +304,19 @@ fn version_json(shared: &Arc<Shared>, current: &str) -> Vec<u8> {
 
 /// 下载某个版本的产物，流式写出（不把整个 exe 读进内存）
 fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_only: bool) -> u16 {
-    let (path, size) = {
+    let path = {
         let Ok(mut repo) = shared.repo.lock() else {
             let _ = write_simple(stream, 500, "text/plain; charset=utf-8", "内部错误".as_bytes());
             return 500;
         };
-        // 先把要用的值取出来，结束对 repo 的不可变借用 —— 下面还要可变借用来加计数
+        // 先把要用的值取出来，结束对 repo 的不可变借用 —— 下面还要可变借用来加计数。
+        // 这里只取文件名：文件大小要用磁盘上的实际值，见下面 File::open 之后的说明。
         let found = repo
             .releases
             .iter()
             .find(|r| r.version == version)
-            .map(|r| (r.file.clone(), r.size));
-        let Some((file_name, size)) = found else {
+            .map(|r| r.file.clone());
+        let Some(file_name) = found else {
             drop(repo);
             let _ = write_simple(
                 stream,
@@ -328,7 +336,7 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
         if let Some(r) = repo.releases.iter_mut().find(|r| r.version == version) {
             r.downloads += 1;
         }
-        (shared.data_dir.join(store::FILES_DIR).join(file_name), size)
+        shared.data_dir.join(store::FILES_DIR).join(file_name)
     };
 
     shared.downloads.fetch_add(1, Ordering::Relaxed);
@@ -341,6 +349,27 @@ fn download(stream: &mut TcpStream, version: &str, shared: &Arc<Shared>, head_on
             "产物文件丢失，请重新发布".as_bytes(),
         );
         return 500;
+    };
+
+    // **Content-Length 必须用文件的实际大小，不能用仓库里记的 size。**
+    //
+    // 内存里的数字只反映"发布那一刻"的文件大小。一旦文件被重新发布、
+    // 手工拷贝、或者服务端启动后磁盘文件被替换过，两者就会对不上，后果很严重：
+    //   · 声明偏小 → 客户端按 Content-Length 读完就停，拿到**截断的 exe**，
+    //     而且字节数刚好等于它期望的 size，校验居然能通过，最后把自己换成坏文件；
+    //   · 声明偏大 → 客户端一直等剩余数据，直到超时。
+    // 磁盘上的文件才是唯一真相。
+    let size = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(err) => {
+            let _ = write_simple(
+                stream,
+                500,
+                "text/plain; charset=utf-8",
+                format!("读取产物信息失败：{err}").as_bytes(),
+            );
+            return 500;
+        }
     };
 
     let header = format!(
