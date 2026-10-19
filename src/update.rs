@@ -3,6 +3,10 @@
 //! 服务端是同级 `server/` 目录里的 `AutoLoginQatarServer`，接口见 `server/src/http.rs`。
 //! 客户端只做「查 + 显示」，不自动下载替换 —— 那是下一步的事。
 
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
 use crate::net;
 use crate::version::{self, VersionState};
 
@@ -24,6 +28,8 @@ pub struct UpdateOutcome {
     pub latest: String,
     pub force: bool,
     pub notes: String,
+    /// 服务端给的产物字节数，用于下载后校验；0 表示服务端没给
+    pub size: u64,
 }
 
 impl UpdateOutcome {
@@ -33,6 +39,7 @@ impl UpdateOutcome {
             latest: String::new(),
             force: false,
             notes: String::new(),
+            size: 0,
         }
     }
 }
@@ -72,6 +79,115 @@ pub fn check() -> UpdateOutcome {
         latest,
         force: json_field(&body, "force").map(|v| v == "true").unwrap_or(false),
         notes: json_field(&body, "notes").unwrap_or_default(),
+        size: json_field(&body, "size")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 下载与安装
+// ---------------------------------------------------------------------------
+
+/// 已经下载并校验过、等待替换的更新包
+pub struct StagedUpdate {
+    pub version: String,
+    pub path: PathBuf,
+    pub size: u64,
+}
+
+/// 把指定版本下载到临时目录并做基本校验。
+///
+/// 校验是必须的：更新流程下一步就是拿这个文件覆盖自己的 exe，
+/// 万一下载到的是错误页或者半截文件，程序就再也起不来了。
+pub fn download(latest: &str, expect_size: u64) -> Result<StagedUpdate, String> {
+    let (host, port) = endpoint();
+    let path = format!("/api/download/{latest}");
+    let dest = std::env::temp_dir().join(format!("AutoLoginQatarTool-{latest}.new.exe"));
+    let _ = std::fs::remove_file(&dest); // 清掉上次的残留
+
+    let written = net::http_download_to(&host, port, &path, &dest)?;
+
+    if expect_size > 0 && written != expect_size {
+        let _ = std::fs::remove_file(&dest);
+        return Err(format!(
+            "下载不完整：收到 {written} 字节，服务端标注 {expect_size} 字节"
+        ));
+    }
+    if !looks_like_exe(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(format!("下载内容不是可执行文件（{written} 字节），已丢弃"));
+    }
+
+    Ok(StagedUpdate {
+        version: latest.to_string(),
+        path: dest,
+        size: written,
+    })
+}
+
+/// PE 文件头是 `MZ`。比"大小看起来差不多"可靠得多 ——
+/// 错误页、代理提示页、半截文件都会被这一条挡下来。
+fn looks_like_exe(path: &Path) -> bool {
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    f.read_exact(&mut head).is_ok() && &head == b"MZ"
+}
+
+/// 用已下载的新版本替换当前 exe，并启动新进程。
+///
+/// 调用方在返回 `Ok` 之后应当立即退出，让新进程接管。
+///
+/// 原理：Windows **不允许覆盖正在运行的 exe，但允许给它改名**。
+/// 所以顺序是「自己改名 → 新文件就位 → 启动新的 → 老的退出」。
+/// 第 2 步失败必须把名字改回去，否则当前目录里就一个能跑的 exe 都没有了。
+pub fn install_and_restart(staged: &StagedUpdate) -> Result<(), String> {
+    let current = std::env::current_exe().map_err(|e| format!("取当前程序路径失败：{e}"))?;
+    let old = current.with_extension("old.exe");
+
+    // 上次更新可能留下 .old，先清掉（删不掉也无所谓，不影响这次替换）
+    let _ = std::fs::remove_file(&old);
+
+    std::fs::rename(&current, &old)
+        .map_err(|e| format!("无法重命名当前程序（可能没有写权限）：{e}"))?;
+
+    if let Err(err) = std::fs::copy(&staged.path, &current) {
+        // 回滚：把名字改回来，至少保证程序还能用
+        let _ = std::fs::rename(&old, &current);
+        return Err(format!("写入新版本失败，已回滚到原版本：{err}"));
+    }
+
+    // 新文件已经就位，临时文件可以删了
+    let _ = std::fs::remove_file(&staged.path);
+
+    // 启动新进程。即使这一步失败，磁盘上已经是新版本了，用户手动打开即可
+    if let Err(err) = std::process::Command::new(&current).spawn() {
+        return Err(format!(
+            "新版本已就位，但自动启动失败（{err}）。请手动打开：{}",
+            current.display()
+        ));
+    }
+
+    Ok(())
+}
+
+/// 新版本启动时清理上一版留下的 `.old` 文件。
+///
+/// 刚启动时旧进程可能还没完全退出，删不掉是正常的 —— 下次启动再删。
+pub fn cleanup_old_version() {
+    let Ok(current) = std::env::current_exe() else {
+        return;
+    };
+    let old = current.with_extension("old.exe");
+    if !old.exists() {
+        return;
+    }
+    match std::fs::remove_file(&old) {
+        Ok(()) => crate::tlog!("已清理上一版残留 {}", old.display()),
+        // 旧进程可能还没完全退出，删不掉很正常，下次启动再试
+        Err(err) => crate::tlog!("清理 {} 失败：{err}", old.display()),
     }
 }
 

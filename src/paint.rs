@@ -28,6 +28,10 @@ pub struct VisualState<'a> {
     pub reset_enabled: bool,
     /// 当前版本相对服务端的状态，决定标题栏版本徽章的颜色（绿 = 最新，黄 = 有更新）
     pub version_state: VersionState,
+    /// 正在下载 / 安装更新（状态徽章改成「更新中」）
+    pub updating: bool,
+    /// 鼠标停在版本徽章上（有新版本时它可点，给一圈描边暗示）
+    pub badge_hover: bool,
 }
 
 impl<'a> VisualState<'a> {
@@ -63,7 +67,7 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     // 标题栏
     draw_camera(canvas, l.icon.x, l.icon.y, l.icon.w);
     canvas.text(APP_TITLE, l.title_text, f.title, rgb(TITLE_TEXT), ALIGN_LEFT);
-    paint_version_badge(canvas, l, f, vs.version_state);
+    paint_version_badge(canvas, l, f, vs);
 
     // 运行状态卡片
     paint_status_card(canvas, l, f, vs);
@@ -133,13 +137,18 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
 ///
 /// 外观与状态卡片里的「运行中」徽章一致（胶囊圆角 + 浅底深字），只用颜色区分新旧：
 /// 绿色 = 当前已是最新，黄色 = 服务端上有更新版本。未摆放时（宽 0）不画。
-fn paint_version_badge(canvas: &Canvas, l: &Layout, f: &Fonts, state: VersionState) {
+fn paint_version_badge(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState) {
     let r = l.version_badge;
     if r.w <= 0 || r.h <= 0 {
         return;
     }
-    let (bg, fg) = state.badge_colors();
-    canvas.fill_round_rect(r, r.h as f32 / 2.0, rgb(bg));
+    let (bg, fg) = vs.version_state.badge_colors();
+    if vs.badge_hover {
+        // 有新版本时徽章可点，悬停给一圈同色描边暗示「这个能点」
+        canvas.round_rect_filled_bordered(r, r.h as f32 / 2.0, rgb(bg), rgb(fg), 1.0);
+    } else {
+        canvas.fill_round_rect(r, r.h as f32 / 2.0, rgb(bg));
+    }
     canvas.text(version::BADGE_TEXT, r, f.badge, rgb(fg), ALIGN_CENTER);
 }
 
@@ -156,10 +165,15 @@ fn paint_status_card(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState) {
         1.0,
     );
 
-    let (dot, badge_bg, badge_fg, badge_text) = match vs.login_state {
-        LoginState::Running => (DOT_RUNNING, BADGE_RUN_BG, BADGE_RUN_FG, "运行中"),
-        LoginState::Handling => (DOT_HANDLING, BADGE_HANDLE_BG, BADGE_HANDLE_FG, "登录中"),
-        LoginState::Stopped => (DOT_STOPPED, BADGE_STOP_BG, BADGE_STOP_FG, "已停止"),
+    // 更新过程中优先显示「更新中」，否则用户会觉得程序没反应
+    let (dot, badge_bg, badge_fg, badge_text) = if vs.updating {
+        (DOT_HANDLING, BADGE_HANDLE_BG, BADGE_HANDLE_FG, "更新中")
+    } else {
+        match vs.login_state {
+            LoginState::Running => (DOT_RUNNING, BADGE_RUN_BG, BADGE_RUN_FG, "运行中"),
+            LoginState::Handling => (DOT_HANDLING, BADGE_HANDLE_BG, BADGE_HANDLE_FG, "登录中"),
+            LoginState::Stopped => (DOT_STOPPED, BADGE_STOP_BG, BADGE_STOP_FG, "已停止"),
+        }
     };
 
     canvas.fill_ellipse(l.status_dot, rgb(dot));

@@ -7,12 +7,16 @@
 //! WinHTTP 封装，只是换了 host / port。
 
 use std::ffi::c_void;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
 use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 use crate::util::to_wide;
@@ -59,6 +63,43 @@ fn http_get(path_and_query: &str) -> Result<String, String> {
 ///
 /// 同步阻塞调用，调用方负责放到后台线程里跑。
 pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<String, String> {
+    let mut body: Vec<u8> = Vec::new();
+    http_fetch(host_name, port, path_and_query, &mut |chunk| {
+        body.extend_from_slice(chunk);
+        true
+    })?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// 下载到本地文件，返回写入的字节数。
+///
+/// 边收边写，不把整个 exe 攒在内存里。
+pub fn http_download_to(
+    host_name: &str,
+    port: u16,
+    path_and_query: &str,
+    dest: &Path,
+) -> Result<u64, String> {
+    let mut file = File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
+    let mut written: u64 = 0;
+    http_fetch(host_name, port, path_and_query, &mut |chunk| {
+        if file.write_all(chunk).is_err() {
+            return false;
+        }
+        written += chunk.len() as u64;
+        true
+    })?;
+    let _ = file.flush();
+    Ok(written)
+}
+
+/// 发一个明文 HTTP GET，把响应体逐块交给 `on_chunk`（返回 false 表示中止）。
+fn http_fetch(
+    host_name: &str,
+    port: u16,
+    path_and_query: &str,
+    on_chunk: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
     unsafe {
         let agent = to_wide("AutoLoginQatarTool");
         let session = WinHttpOpen(
@@ -71,17 +112,17 @@ pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<S
         if session.is_null() {
             return Err("无法初始化网络会话".into());
         }
-        let session_guard = HandleGuard(session);
+        // 句柄守卫活到函数结束，任意返回路径上都会释放（drop 顺序与创建顺序相反）
+        let _session = HandleGuard(session);
 
         let _ = WinHttpSetTimeouts(session, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS);
 
         let host = to_wide(host_name);
         let connect = WinHttpConnect(session, PCWSTR(host.as_ptr()), port, 0);
         if connect.is_null() {
-            drop(session_guard);
             return Err("无法连接到服务器".into());
         }
-        let connect_guard = HandleGuard(connect);
+        let _connect = HandleGuard(connect);
 
         let verb = to_wide("GET");
         let object = to_wide(path_and_query);
@@ -95,27 +136,34 @@ pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<S
             WINHTTP_OPEN_REQUEST_FLAGS(0), // 明文 HTTP，不需要 WINHTTP_FLAG_SECURE
         );
         if request.is_null() {
-            drop(connect_guard);
-            drop(session_guard);
             return Err("无法创建请求".into());
         }
-        let request_guard = HandleGuard(request);
+        let _request = HandleGuard(request);
 
-        if let Err(err) = WinHttpSendRequest(request, None, None, 0, 0, 0) {
-            drop(request_guard);
-            drop(connect_guard);
-            drop(session_guard);
-            return Err(format!("发送请求失败：{}", err.message()));
-        }
-        if let Err(err) = WinHttpReceiveResponse(request, std::ptr::null_mut()) {
-            drop(request_guard);
-            drop(connect_guard);
-            drop(session_guard);
-            return Err(format!("接收响应失败：{}", err.message()));
+        WinHttpSendRequest(request, None, None, 0, 0, 0)
+            .map_err(|e| format!("发送请求失败：{}", e.message()))?;
+        WinHttpReceiveResponse(request, std::ptr::null_mut())
+            .map_err(|e| format!("接收响应失败：{}", e.message()))?;
+
+        // 状态码必须查。下载更新包时，如果把 404/500 的错误页当成 exe 存下来，
+        // 下一步就会拿它替换掉自己 —— 这个检查是最后一道闸。
+        let mut status: u32 = 0;
+        let mut len = std::mem::size_of::<u32>() as u32;
+        let mut index: u32 = 0;
+        WinHttpQueryHeaders(
+            request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some(&mut status as *mut u32 as *mut c_void),
+            &mut len,
+            &mut index,
+        )
+        .map_err(|e| format!("读取响应状态码失败：{}", e.message()))?;
+        if status != 200 {
+            return Err(format!("服务端返回 HTTP {status}"));
         }
 
-        let mut body: Vec<u8> = Vec::new();
-        let mut buffer = [0u8; 4096];
+        let mut buffer = [0u8; 64 * 1024];
         loop {
             let mut available: u32 = 0;
             if WinHttpQueryDataAvailable(request, &mut available).is_err() {
@@ -139,10 +187,11 @@ pub fn http_get_on(host_name: &str, port: u16, path_and_query: &str) -> Result<S
             if read == 0 {
                 break;
             }
-            body.extend_from_slice(&buffer[..read as usize]);
+            if !on_chunk(&buffer[..read as usize]) {
+                break;
+            }
         }
-
-        Ok(String::from_utf8_lossy(&body).into_owned())
+        Ok(())
     }
 }
 

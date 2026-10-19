@@ -191,6 +191,8 @@ pub fn render_case(dir: &str, scale: f32, case: &PreviewCase) -> Result<String, 
                 stop_enabled: case.login_state != LoginState::Stopped,
                 reset_enabled: true,
                 version_state: case.version_state,
+                updating: false,
+                badge_hover: false,
             };
             paint_all(&canvas, &layout, &fonts, &vs, true);
         }

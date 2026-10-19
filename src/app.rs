@@ -80,6 +80,8 @@ const TOGGLE_ANIM_MS: u64 = 140;
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_RESET_DONE: u32 = WM_APP + 2;
 pub const WM_UPDATE_DONE: u32 = WM_APP + 3;
+/// 更新包已下载完毕（后台线程 → 界面线程）
+pub const WM_UPDATE_READY: u32 = WM_APP + 4;
 
 
 // ---------------------------------------------------------------------------
@@ -158,6 +160,14 @@ pub struct App {
 
     /// 更新检查的结果回传通道（检查在后台线程里做）
     update_rx: Option<mpsc::Receiver<UpdateOutcome>>,
+    /// 最近一次检查的结果。点版本徽章触发更新时要用（版本号、说明、大小）。
+    pub update_info: Option<UpdateOutcome>,
+    /// 正在下载 / 安装更新
+    pub updating: bool,
+    /// 鼠标停在版本徽章上（有新版本时徽章可点）
+    pub badge_hover: bool,
+    /// 更新包下载的结果回传通道
+    install_rx: Option<mpsc::Receiver<Result<update::StagedUpdate, String>>>,
 
     // 画刷
     pub brush_white: HBRUSH,
@@ -221,6 +231,10 @@ impl App {
             tray_tip: String::new(),
             reset_rx: None,
             update_rx: None,
+            update_info: None,
+            updating: false,
+            badge_hover: false,
+            install_rx: None,
             reset_busy: false,
             brush_white: unsafe { CreateSolidBrush(COLORREF(colorref(theme::INPUT_BG))) },
             brush_disabled: unsafe {
@@ -236,6 +250,8 @@ impl App {
 
     /// WM_CREATE 阶段调用：创建子控件、背景层与托盘图标
     pub fn init_ui(&mut self) {
+        // 上一版更新时留下的 .old 文件，顺手清掉（删不掉也无所谓）
+        update::cleanup_old_version();
         self.create_children();
         self.create_backdrop();
         self.tray.show(self.hicon);
@@ -471,6 +487,8 @@ impl App {
             stop_enabled: self.login_state != LoginState::Stopped,
             reset_enabled: !self.reset_busy,
             version_state: self.version_state,
+            updating: self.updating,
+            badge_hover: self.badge_hover,
         }
     }
 
@@ -530,7 +548,102 @@ impl App {
                 notes
             );
         }
-        self.set_version_state(outcome.state);
+        let state = outcome.state;
+        self.update_info = Some(outcome);
+        self.set_version_state(state);
+    }
+
+    /// 版本徽章是否可点（有新版本、且当前没在更新）
+    pub fn badge_clickable(&self) -> bool {
+        !self.updating
+            && self
+                .update_info
+                .as_ref()
+                .map(|info| info.state == VersionState::Outdated && !info.latest.is_empty())
+                .unwrap_or(false)
+    }
+
+    /// 点了版本徽章：确认后开始下载新版本
+    pub fn on_update_click(&mut self) {
+        if !self.badge_clickable() {
+            return;
+        }
+        let Some(info) = self.update_info.clone() else {
+            return;
+        };
+
+        let notes = if info.notes.trim().is_empty() {
+            "（服务端没有提供更新说明）".to_string()
+        } else {
+            info.notes.trim().to_string()
+        };
+        let text = format!(
+            "发现新版本 v{}\n\n{}\n\n更新完成后程序会自动重启，账户密码与开机自启设置保持不变。\n\n是否现在更新？",
+            info.latest, notes
+        );
+        if !self.confirm_box("发现新版本", &text) {
+            return;
+        }
+
+        crate::tlog!("开始下载 v{}", info.latest);
+        self.updating = true;
+        self.repaint();
+
+        let (tx, rx) = mpsc::channel();
+        self.install_rx = Some(rx);
+        let hwnd_raw = self.hwnd.0 as isize;
+        let latest = info.latest.clone();
+        let size = info.size;
+        std::thread::spawn(move || {
+            let result = update::download(&latest, size);
+            let _ = tx.send(result);
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_raw as *mut c_void)),
+                    WM_UPDATE_READY,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+    }
+
+    /// 下载结束：成功就替换并重启，失败就恢复原状并说明原因
+    pub fn on_update_ready(&mut self) {
+        let Some(rx) = self.install_rx.take() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+
+        match result {
+            Ok(staged) => match update::install_and_restart(&staged) {
+                Ok(()) => {
+                    crate::tlog!(
+                        "v{} 已就位（{} 字节），退出让新进程接管",
+                        staged.version,
+                        staged.size
+                    );
+                    // 新进程已经启动，这边直接退出
+                    unsafe {
+                        let _ = DestroyWindow(self.hwnd);
+                    }
+                }
+                Err(err) => {
+                    crate::tlog!("更新失败：{err}");
+                    self.updating = false;
+                    self.repaint();
+                    self.error_box("更新失败", &err);
+                }
+            },
+            Err(err) => {
+                crate::tlog!("下载失败：{err}");
+                self.updating = false;
+                self.repaint();
+                self.error_box("下载失败", &err);
+            }
+        }
     }
 
     /// 更新检查定时器：第一次是「启动后延迟几秒」，之后固定 6 小时一轮
@@ -1111,6 +1224,19 @@ impl App {
                 PCWSTR(c.as_ptr()),
                 MB_OK | MB_ICONINFORMATION,
             );
+        }
+    }
+
+    /// 是 / 否确认框
+    pub fn confirm_box(&self, caption: &str, text: &str) -> bool {
+        let (c, t) = (to_wide(caption), to_wide(text));
+        unsafe {
+            MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(t.as_ptr()),
+                PCWSTR(c.as_ptr()),
+                MB_YESNO | MB_ICONQUESTION,
+            ) == IDYES
         }
     }
 

@@ -11,7 +11,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{self, App, WM_RESET_DONE, WM_TRAY, WM_UPDATE_DONE};
+use crate::app::{self, App, WM_RESET_DONE, WM_TRAY, WM_UPDATE_DONE, WM_UPDATE_READY};
 use crate::backdrop;
 use crate::tlog;
 use crate::icon;
@@ -204,11 +204,30 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             LRESULT(0)
         }
 
-        // 点到输入框的留白区域时，把焦点转给里面的原生 EDIT
+        // 鼠标落在可点的版本徽章上时给手型，否则用默认箭头
+        WM_SETCURSOR => {
+            if let Some(app) = app {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
+                if app.layout.version_badge.contains(pt.x, pt.y) && app.badge_clickable() {
+                    let _ = SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
         WM_LBUTTONDOWN => {
             if let Some(app) = app {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                // 版本徽章：有新版本时点它触发更新
+                if app.layout.version_badge.contains(x, y) && app.badge_clickable() {
+                    app.on_update_click();
+                    return LRESULT(0);
+                }
+                // 点到输入框的留白区域时，把焦点转给里面的原生 EDIT
                 if app.layout.account_field.contains(x, y) {
                     let _ = SetFocus(Some(app.h_account));
                 } else if app.layout.password_field.contains(x, y) {
@@ -348,6 +367,13 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_UPDATE_DONE => {
             if let Some(app) = app {
                 app.on_update_done();
+            }
+            LRESULT(0)
+        }
+
+        WM_UPDATE_READY => {
+            if let Some(app) = app {
+                app.on_update_ready();
             }
             LRESULT(0)
         }
