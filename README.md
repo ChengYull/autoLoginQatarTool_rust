@@ -31,9 +31,9 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 | 控件定位 | `automation.rs` | 按几何位置而非控件顺序定位（密码框取最下方 Edit、账户框取密码框上方纵坐标最大的 ComboBox） |
 | 密码错误识别 | `automation.rs` | Qatar 匹配与语言无关的返回码 `ec: -3`；QtPacker 匹配标题 `Message` 且正文含 `Fail to login` 的提示框 |
 | 设置密码 | `net.rs` | `POST /api/user/setpassword`，JSON `{"uid","pwd"}`，**响应体恰好是 `ok`** 才算成功；失败时原样展示服务端文案 |
-| 密码自动重置 | `pwd.rs` + `app.rs` | 7 个密码按 7 天滚动切换，49 天一轮回；提前 6 小时触发，启动后每分钟检查一次 |
+| 密码自动重置 | `pwd.rs` + `app.rs` | 7 个密码按 7 天滚动切换，49 天一轮回；提前 6 小时触发，启动后每分钟检查一次；主页有独立开关，7 个密码没配齐时点开关直接拉出配置对话框 |
 | 密码池存储 | `settings.rs` | 7 个密码用 DPAPI 加密后写 `REG_BINARY pwdPool`，只有当前 Windows 用户能解开 |
-| 密码对话框 | `dlg.rs` | 三点菜单 →「自定义密码」单次设置 /「自动重置密码」7 个密码 + 随机生成；不合规的输入框描红 |
+| 密码对话框 | `dlg.rs` | 三点菜单 →「自定义密码」单次设置 /「自动重置密码」7 个密码 + 随机生成；不合规的输入框描红；开启自动重置后输入与「生成」锁定，只能点小眼睛查看 |
 | 开机自启 | `settings.rs` | 写入 `HKCU\...\CurrentVersion\Run\autoLoginQatarApp` |
 | 配置持久化 | `settings.rs` | `HKCU\Software\Qtech\autoLoginQatarApp` |
 | 系统托盘 | `tray.rs` | 双击恢复主界面，右键菜单含状态展示 / 启停 / 显示 / 退出 |

@@ -31,7 +31,10 @@ pub enum Widget {
     Copy,
     Start,
     Stop,
+    /// 开机自启动开关
     Toggle,
+    /// 密码自动重置开关（1.0.5）
+    ResetToggle,
     Eye,
 }
 

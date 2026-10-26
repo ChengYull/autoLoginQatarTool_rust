@@ -54,6 +54,8 @@ pub const ID_MIN: usize = 1008;
 pub const ID_CLOSE: usize = 1009;
 /// 标题栏「三个点」：密码相关菜单（1.0.5）
 pub const ID_MORE: usize = 1010;
+/// 「密码自动重置」开关
+pub const ID_RESET_TOGGLE: usize = 1011;
 
 // 托盘菜单命令 ID
 pub const IDM_STATUS: usize = 2001;
@@ -147,6 +149,8 @@ pub struct App {
     pub h_eye: HWND,
     pub h_copy: HWND,
     pub h_toggle: HWND,
+    /// 密码自动重置开关
+    pub h_reset_toggle: HWND,
     pub h_start: HWND,
     pub h_stop: HWND,
     pub h_min: HWND,
@@ -177,11 +181,15 @@ pub struct App {
     pub account_hover: bool,
     pub password_hover: bool,
 
-    // 开关动画
+    // 开关动画（两个开关各一套）
     pub toggle_pos: f32,
     toggle_from: f32,
     toggle_to: f32,
     toggle_start: u64,
+    pub reset_pos: f32,
+    reset_from: f32,
+    reset_to: f32,
+    reset_start: u64,
 
     // 托盘
     pub tray: Tray,
@@ -223,6 +231,7 @@ pub struct App {
 impl App {
     pub fn new(hwnd: HWND, hinst: HINSTANCE, dpi: u32, hicon: HICON) -> Box<Self> {
         let saved = Settings::load();
+        let pool_auto = saved.pool.auto;
         // 字体必须先建：布局里输入框的垂直位置依赖正文字体的行高，
         // 版本徽章的摆放还要按实测文字宽度来
         let fonts = Fonts::new(dpi);
@@ -244,6 +253,7 @@ impl App {
             h_eye: HWND::default(),
             h_copy: HWND::default(),
             h_toggle: HWND::default(),
+            h_reset_toggle: HWND::default(),
             h_start: HWND::default(),
             h_stop: HWND::default(),
             h_min: HWND::default(),
@@ -268,6 +278,10 @@ impl App {
             toggle_from: 0.0,
             toggle_to: 0.0,
             toggle_start: 0,
+            reset_pos: if pool_auto { 1.0 } else { 0.0 },
+            reset_from: 0.0,
+            reset_to: 0.0,
+            reset_start: 0,
             tray: Tray::new(hwnd, hicon),
             hicon,
             taskbar_created_msg,
@@ -378,6 +392,8 @@ impl App {
             self.h_eye = self.create_widget(EYE_CLASS, ID_EYE, l.eye);
             self.h_copy = self.create_widget(BTN_CLASS, ID_COPY, l.copy_btn);
             self.h_toggle = self.create_widget(TOGGLE_CLASS, ID_TOGGLE, l.toggle);
+            self.h_reset_toggle =
+                self.create_widget(TOGGLE_CLASS, ID_RESET_TOGGLE, l.reset_toggle);
             self.h_start = self.create_widget(BTN_CLASS, ID_START, l.start_btn);
             self.h_stop = self.create_widget(BTN_CLASS, ID_STOP, l.stop_btn);
             self.h_min = self.create_widget(BTN_CLASS, ID_MIN, l.btn_min);
@@ -454,6 +470,7 @@ impl App {
             (self.h_eye, l.eye),
             (self.h_copy, l.copy_btn),
             (self.h_toggle, l.toggle),
+            (self.h_reset_toggle, l.reset_toggle),
             (self.h_start, l.start_btn),
             (self.h_stop, l.stop_btn),
             (self.h_min, l.btn_min),
@@ -537,7 +554,8 @@ impl App {
             start_enabled: self.login_state == LoginState::Stopped,
             stop_enabled: self.login_state != LoginState::Stopped,
             copy_enabled: !self.password.is_empty(),
-            next_reset: self.next_reset_text(),
+            reset_desc: self.next_reset_text(),
+            reset_pos: self.reset_pos,
             version_state: self.version_state,
             updating: self.updating,
             badge_hover: self.badge_hover,
@@ -547,13 +565,13 @@ impl App {
     /// 开关下方那行小字的文案
     pub fn next_reset_text(&self) -> String {
         if !self.pool.is_configured() {
-            return "未配置密码轮换，点右上角 ···".into();
+            return "未配置 7 个密码，点开关开始设置".into();
         }
         if !self.pool.auto {
-            return "自动重置已暂停".into();
+            return "已暂停，到期不会自动改密".into();
         }
         if self.pool.last_reset <= 0 {
-            return "下次重置：保存后生效".into();
+            return "已开启，等待首次生效".into();
         }
         let days = self.pool.days_until_due(crate::pwd::now_unix());
         if days <= 0 {
@@ -964,6 +982,11 @@ impl App {
                 self.login_state == LoginState::Stopped,
             ),
             ID_TOGGLE => paint_toggle(&canvas, Rect::new(0, 0, l.toggle.w, l.toggle.h), self.toggle_pos),
+            ID_RESET_TOGGLE => paint_toggle(
+                &canvas,
+                Rect::new(0, 0, l.reset_toggle.w, l.reset_toggle.h),
+                self.reset_pos,
+            ),
             ID_EYE => icon::draw_eye(
                 &canvas,
                 Rect::new(0, 0, l.eye.w, l.eye.h),
@@ -1415,6 +1438,7 @@ impl App {
                 && now - self.pool.last_reset >= crate::pwd::PERIOD_SECS;
             if stale {
                 self.save_settings();
+                self.animate_reset_toggle();
                 self.repaint();
                 self.on_daily_tick();
                 return;
@@ -1456,9 +1480,11 @@ impl App {
                 };
                 self.start_set_password(first, ctx);
             }
+            self.animate_reset_toggle();
         } else {
             // 停用，或者本来就是启用状态只是改了密码列表：只落盘，不动计时
             self.save_settings();
+            self.animate_reset_toggle();
             self.repaint();
         }
     }
@@ -1680,17 +1706,75 @@ impl App {
     }
 
     pub fn on_anim_timer(&mut self) {
-        let elapsed = now_ms().saturating_sub(self.toggle_start);
-        let t = (elapsed as f32 / TOGGLE_ANIM_MS as f32).clamp(0.0, 1.0);
-        let eased = ease_in_out_cubic(t);
-        self.toggle_pos = self.toggle_from + (self.toggle_to - self.toggle_from) * eased;
-        if t >= 1.0 {
+        let now = now_ms();
+        let mut running = false;
+
+        // 开机自启动
+        let t1 = (now.saturating_sub(self.toggle_start) as f32 / TOGGLE_ANIM_MS as f32)
+            .clamp(0.0, 1.0);
+        self.toggle_pos = self.toggle_from + (self.toggle_to - self.toggle_from) * ease_in_out_cubic(t1);
+        if t1 >= 1.0 {
             self.toggle_pos = self.toggle_to;
+        } else {
+            running = true;
+        }
+        self.repaint_child(self.h_toggle);
+
+        // 密码自动重置
+        let t2 = (now.saturating_sub(self.reset_start) as f32 / TOGGLE_ANIM_MS as f32)
+            .clamp(0.0, 1.0);
+        self.reset_pos = self.reset_from + (self.reset_to - self.reset_from) * ease_in_out_cubic(t2);
+        if t2 >= 1.0 {
+            self.reset_pos = self.reset_to;
+        } else {
+            running = true;
+        }
+        self.repaint_child(self.h_reset_toggle);
+
+        if !running {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER_ANIM);
             }
         }
-        self.repaint_child(self.h_toggle);
+    }
+
+    /// 主页的「密码自动重置」开关
+    pub fn on_toggle_auto_reset(&mut self) {
+        // 7 个密码还没配齐：点开关等于「去配置」，直接把对话框拉出来
+        if !self.pool.is_configured() {
+            self.open_auto_password_dialog();
+            return;
+        }
+        let next = !self.pool.auto;
+        self.set_pool_auto(next);
+    }
+
+    fn set_pool_auto(&mut self, value: bool) {
+        if self.pool.auto == value {
+            return;
+        }
+        self.pool.auto = value;
+        self.animate_reset_toggle();
+        self.save_settings();
+        self.repaint();
+        if value {
+            // 关掉太久、密码已经过期的话，开起来就立刻补一次
+            self.on_daily_tick();
+        }
+    }
+
+    /// 让开关滑块滑到 pool.auto 对应的位置
+    fn animate_reset_toggle(&mut self) {
+        let target = if self.pool.auto { 1.0 } else { 0.0 };
+        if (self.reset_pos - target).abs() < 0.01 {
+            return;
+        }
+        self.reset_from = self.reset_pos;
+        self.reset_to = target;
+        self.reset_start = now_ms();
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), TIMER_ANIM, 16, None);
+        }
     }
 
     pub fn toggle_password_visible(&mut self) {

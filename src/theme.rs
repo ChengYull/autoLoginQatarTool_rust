@@ -105,9 +105,8 @@ pub const APP_TITLE: &str = "自动登录工具";
 // ---------------------------------------------------------------------------
 
 pub const CARD_W: f32 = 312.0;
-/// 1.0.5 比 1.0.4 多了一行「下次重置：X 天后」（15px + 6px 间距），
-/// 卡片高度相应 +21。
-pub const CARD_H: f32 = 287.0;
+/// 1.0.5 在「开机自启动」下面多了一整行「密码自动重置」开关（34px + 10px 间距）。
+pub const CARD_H: f32 = 310.0;
 pub const CARD_RADIUS: f32 = 14.0;
 
 const TITLE_BAR_H: f32 = 42.0;
@@ -174,8 +173,10 @@ pub struct Layout {
     pub switch_title: Rect,
     pub switch_desc: Rect,
     pub toggle: Rect,
-    /// 开关下方的一行小字：下次重置：X 天后
-    pub next_reset: Rect,
+    /// 「密码自动重置」这一行：标题 + 状态描述 + 开关
+    pub reset_title: Rect,
+    pub reset_desc: Rect,
+    pub reset_toggle: Rect,
     pub start_btn: Rect,
     pub stop_btn: Rect,
 }
@@ -284,9 +285,16 @@ impl Layout {
         let toggle = r(inner_x + inner_w - TOGGLE_W, y + (SWITCH_ROW_H - TOGGLE_H) / 2.0, TOGGLE_W, TOGGLE_H);
         y += SWITCH_ROW_H + GAP;
 
-        // 密码轮换状态：一行小字，右对齐到卡片内边距
-        let next_reset = r(inner_x, y, inner_w, 15.0);
-        y += 15.0 + 6.0;
+        // 密码自动重置：和上面那行同构，描述里带「下次重置：X 天后」
+        let reset_title = r(inner_x, y + 2.0, 200.0, 16.0);
+        let reset_desc = r(inner_x, y + 2.0 + 16.0 + 2.0, 220.0, 15.0);
+        let reset_toggle = r(
+            inner_x + inner_w - TOGGLE_W,
+            y + (SWITCH_ROW_H - TOGGLE_H) / 2.0,
+            TOGGLE_W,
+            TOGGLE_H,
+        );
+        y += SWITCH_ROW_H + GAP;
 
         let half = (inner_w - BTN_GAP) / 2.0;
         let start_btn = r(inner_x, y, half, BTN_ROW_H);
@@ -323,7 +331,9 @@ impl Layout {
             switch_title,
             switch_desc,
             toggle,
-            next_reset,
+            reset_title,
+            reset_desc,
+            reset_toggle,
             start_btn,
             stop_btn,
         }

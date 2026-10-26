@@ -526,9 +526,19 @@ unsafe extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
 
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let hdc = HDC(wparam.0 as *mut c_void);
+            let ctrl = HWND(lparam.0 as *mut c_void);
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(colorref(theme::INPUT_TEXT)));
-            // 静态文本（标签 / 复选框）用透明底，避免出现一块灰底
+            // 被禁用的输入框走的是 WM_CTLCOLORSTATIC，文字要跟着变灰，
+            // 否则看起来跟可编辑的一模一样
+            let enabled = IsWindowEnabled(ctrl).as_bool();
+            SetTextColor(
+                hdc,
+                COLORREF(colorref(if enabled {
+                    theme::INPUT_TEXT
+                } else {
+                    theme::INPUT_DISABLED_TEXT
+                })),
+            );
             if msg == WM_CTLCOLORSTATIC {
                 return LRESULT(GetStockObject(NULL_BRUSH).0 as isize);
             }
@@ -565,6 +575,23 @@ fn invalidate_button(dlg: &Dlg, id: usize) {
     unsafe {
         if let Ok(h) = GetDlgItem(Some(dlg.hwnd), id as i32) {
             let _ = InvalidateRect(Some(h), None, true);
+        }
+    }
+}
+
+/// 自动重置开启后，7 个密码和账户都不允许再改 —— 服务端那边已经生效了，
+/// 本地再改只会让两边对不上。小眼睛不禁用，用户还能核对密码。
+fn apply_lock_state(dlg: &Dlg) {
+    let locked = dlg.kind == Kind::Auto && dlg.auto_enabled;
+    unsafe {
+        for &edit in dlg.pwd_edits.iter() {
+            let _ = EnableWindow(edit, !locked);
+        }
+        if let Ok(acc) = GetDlgItem(Some(dlg.hwnd), ID_ACCOUNT as i32) {
+            let _ = EnableWindow(acc, !locked);
+        }
+        if let Ok(gen) = GetDlgItem(Some(dlg.hwnd), ID_GEN as i32) {
+            let _ = EnableWindow(gen, !locked);
         }
     }
 }
@@ -695,6 +722,9 @@ fn create_children(dlg: &mut Dlg) {
     unsafe {
         SendMessageW(close, WM_SETFONT, Some(WPARAM(dlg.fonts.body.0 as usize)), Some(LPARAM(1)));
     }
+
+    // 打开时可能本来就是启用状态，先把输入锁上
+    apply_lock_state(dlg);
 }
 
 fn create_child(dlg: &Dlg, class: &str, style: WINDOW_STYLE, id: usize, r: Rect) -> HWND {
@@ -892,7 +922,11 @@ fn draw_button(dlg: &Dlg, dis: &DRAWITEMSTRUCT) {
                 (BtnKind::Secondary, "取消", false)
             }
         }
-        ID_GEN => (BtnKind::Ghost, "生成", false),
+        ID_GEN => (
+            BtnKind::Ghost,
+            "生成",
+            dlg.kind == Kind::Auto && dlg.auto_enabled,
+        ),
         ID_CLOSE_BTN => (BtnKind::WinClose, "✕", false),
         _ => return,
     };
@@ -1008,6 +1042,7 @@ fn on_primary(dlg: &mut Dlg) {
                 dlg.auto_enabled = true;
                 dlg.touched = true;
                 dlg.show_errors = false;
+                apply_lock_state(dlg);
                 invalidate_actions(dlg);
             }
         }
@@ -1020,6 +1055,7 @@ fn on_secondary(dlg: &mut Dlg) {
         // 停用不校验密码 —— 用户可能正在改列表，先让他把开关关掉
         dlg.auto_enabled = false;
         dlg.touched = true;
+        apply_lock_state(dlg);
         invalidate_actions(dlg);
         return;
     }

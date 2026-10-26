@@ -27,7 +27,7 @@ pub const DT_NOPREFIX: u32 = 0x0800;
 
 pub const ALIGN_LEFT: u32 = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
 pub const ALIGN_CENTER: u32 = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
-pub const ALIGN_RIGHT: u32 = 0x0002 | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+
 
 // ---------------------------------------------------------------------------
 // GDI+ 生命周期

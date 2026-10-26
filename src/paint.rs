@@ -1,6 +1,6 @@
 //! 界面绘制。所有组件都对齐原版 QSS 的配色与圆角。
 
-use crate::gfx::{ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT, Canvas, Fonts};
+use crate::gfx::{ALIGN_CENTER, ALIGN_LEFT, Canvas, Fonts};
 use crate::icon::{draw_camera, draw_copy, draw_eye, draw_more};
 use crate::model::{BtnKind, LoginState, Widget};
 use crate::theme::*;
@@ -26,8 +26,10 @@ pub struct VisualState<'a> {
     pub start_enabled: bool,
     pub stop_enabled: bool,
     pub copy_enabled: bool,
-    /// 开关下方那行「下次重置：X 天后」（1.0.5）
-    pub next_reset: String,
+    /// 「密码自动重置」那一行的描述文字（下次重置天数 / 已暂停 / 未配置）
+    pub reset_desc: String,
+    /// 密码自动重置开关的位置（0.0 = 关，1.0 = 开）
+    pub reset_pos: f32,
     /// 当前版本相对服务端的状态，决定标题栏版本徽章的颜色（绿 = 最新，黄 = 有更新）
     pub version_state: VersionState,
     /// 正在下载 / 安装更新（状态徽章改成「更新中」）
@@ -79,7 +81,8 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     canvas.text("密码", l.password_label, f.label, rgb(LABEL), ALIGN_LEFT);
     canvas.text("开机自启动", l.switch_title, f.label, rgb(LABEL), ALIGN_LEFT);
     canvas.text("随 Windows 启动后常驻系统托盘", l.switch_desc, f.small, rgb(SWITCH_DESC), ALIGN_LEFT);
-    canvas.text(&vs.next_reset, l.next_reset, f.small, rgb(SWITCH_DESC), ALIGN_RIGHT);
+    canvas.text("密码自动重置", l.reset_title, f.label, rgb(LABEL), ALIGN_LEFT);
+    canvas.text(&vs.reset_desc, l.reset_desc, f.small, rgb(SWITCH_DESC), ALIGN_LEFT);
 
     // 输入框外框
     paint_field(
@@ -147,8 +150,9 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
         1.5 * l.scale,
     );
 
-    // 开机自启开关
+    // 两个开关
     paint_toggle(canvas, l.toggle, vs.toggle_pos);
+    paint_toggle(canvas, l.reset_toggle, vs.reset_pos);
 
     // 启动 / 停止
     paint_button(canvas, f, l.start_btn, BtnKind::Primary, "启动", l.scale, vs.hovered(Widget::Start), vs.pressed(Widget::Start), !vs.start_enabled);

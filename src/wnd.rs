@@ -40,6 +40,7 @@ fn widget_of(id: usize) -> Option<Widget> {
         app::ID_START => Some(Widget::Start),
         app::ID_STOP => Some(Widget::Stop),
         app::ID_TOGGLE => Some(Widget::Toggle),
+        app::ID_RESET_TOGGLE => Some(Widget::ResetToggle),
         app::ID_EYE => Some(Widget::Eye),
         _ => None,
     }
@@ -600,6 +601,7 @@ unsafe extern "system" fn widget_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, l
                             let next = !app.auto_start;
                             app.set_auto_start(next);
                         }
+                        Some(Widget::ResetToggle) => app.on_toggle_auto_reset(),
                         Some(Widget::Eye) => app.toggle_password_visible(),
                         // 三点按钮直接弹菜单，不经过 WM_COMMAND
                         Some(Widget::More) => app.on_more_menu(),
