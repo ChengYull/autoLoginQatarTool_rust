@@ -84,17 +84,27 @@ pub fn set_password(uid: &str, pwd: &str) -> SetPwdResult {
     );
     let (host, port) = setpwd_endpoint();
     match http_post_json(&host, port, SETPWD_PATH, &body) {
-        Ok(text) => {
-            let trimmed = text.trim().trim_start_matches('\u{feff}').trim();
-            if trimmed.eq_ignore_ascii_case(SETPWD_OK) {
-                SetPwdResult::Ok
-            } else if trimmed.is_empty() {
-                SetPwdResult::Rejected("接口未返回内容，请检查网络或接口地址。".into())
-            } else {
-                SetPwdResult::Rejected(trimmed.to_string())
-            }
-        }
+        Ok(text) => parse_setpwd_response(&text),
         Err(err) => SetPwdResult::Failed(err),
+    }
+}
+
+/// 解析服务端响应体。
+///
+/// **文档写的是裸 `ok`，实际返回的是带引号的 JSON 字符串 `"ok"`。**
+/// 按裸串比对会把成功判成失败，弹出一个正文就是 `"ok"` 的错误框 ——
+/// 这个 bug 只有真连一次接口才会暴露，所以判定逻辑单独抽出来做单测。
+///
+/// 顺带把失败文案两端的引号也去掉，弹窗里看起来干净些。
+fn parse_setpwd_response(text: &str) -> SetPwdResult {
+    let trimmed = text.trim().trim_start_matches('\u{feff}').trim();
+    let payload = trimmed.trim_matches('"').trim();
+    if payload.eq_ignore_ascii_case(SETPWD_OK) {
+        SetPwdResult::Ok
+    } else if payload.is_empty() {
+        SetPwdResult::Rejected("接口未返回内容，请检查网络或接口地址。".into())
+    } else {
+        SetPwdResult::Rejected(payload.to_string())
     }
 }
 
@@ -350,3 +360,43 @@ impl Drop for HandleGuard {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setpwd_accepts_quoted_and_bare_ok() {
+        // 线上真实返回是带引号的 "ok"；文档写的是裸 ok。两种都得认。
+        assert!(matches!(parse_setpwd_response("\"ok\""), SetPwdResult::Ok));
+        assert!(matches!(parse_setpwd_response("ok"), SetPwdResult::Ok));
+        assert!(matches!(parse_setpwd_response("  \"OK\" \r\n"), SetPwdResult::Ok));
+        assert!(matches!(
+            parse_setpwd_response("\u{feff}\"ok\""),
+            SetPwdResult::Ok
+        ));
+    }
+
+    #[test]
+    fn setpwd_keeps_server_message() {
+        match parse_setpwd_response("\"该密码在最近一个月使用过。请尝试新密码!\"") {
+            SetPwdResult::Rejected(msg) => {
+                assert_eq!(msg, "该密码在最近一个月使用过。请尝试新密码!");
+                assert!(is_reuse_rejection(&msg));
+            }
+            other => panic!("应判为拒绝: {other:?}"),
+        }
+        match parse_setpwd_response("\"密码不符合规范！\"") {
+            SetPwdResult::Rejected(msg) => assert_eq!(msg, "密码不符合规范！"),
+            other => panic!("应判为拒绝: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_body_is_rejected_with_hint() {
+        match parse_setpwd_response("   ") {
+            SetPwdResult::Rejected(msg) => assert!(msg.contains("未返回内容")),
+            other => panic!("应判为拒绝: {other:?}"),
+        }
+    }
+}
