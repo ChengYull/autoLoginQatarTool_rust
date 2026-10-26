@@ -85,6 +85,10 @@ pub const MENU_SEL_FG: u32 = 0x1D_4ED8;
 pub const MENU_DISABLED_FG: u32 = 0x94_A3B8;
 pub const MENU_SEPARATOR: u32 = 0xEE_F2F7;
 
+/// 密码不合规时的输入框描边与提示文字（1.0.5）
+pub const DANGER_BORDER: u32 = 0xEF_4444;
+pub const DANGER_TEXT: u32 = 0xDC_2626;
+
 /// 相机图标上的多彩光圈（与 app.svg 一致）
 pub const LENS_PETALS: [u32; 6] = [0x46_93E4, 0x7F_D04B, 0x4E_C1C6, 0xA8_D84A, 0x58_A9EA, 0x6C_C9A0];
 
@@ -101,7 +105,9 @@ pub const APP_TITLE: &str = "自动登录工具";
 // ---------------------------------------------------------------------------
 
 pub const CARD_W: f32 = 312.0;
-pub const CARD_H: f32 = 266.0;
+/// 1.0.5 比 1.0.4 多了一行「下次重置：X 天后」（15px + 6px 间距），
+/// 卡片高度相应 +21。
+pub const CARD_H: f32 = 287.0;
 pub const CARD_RADIUS: f32 = 14.0;
 
 const TITLE_BAR_H: f32 = 42.0;
@@ -148,6 +154,8 @@ pub struct Layout {
     pub version_badge: Rect,
     pub btn_min: Rect,
     pub btn_close: Rect,
+    /// 标题栏「三个点」，摆在最小化左边
+    pub btn_more: Rect,
     pub status_card: Rect,
     pub status_dot: Rect,
     pub status_title: Rect,
@@ -162,10 +170,12 @@ pub struct Layout {
     pub password_edit: Rect,
     pub password_text: Rect,
     pub eye: Rect,
-    pub reset_btn: Rect,
+    pub copy_btn: Rect,
     pub switch_title: Rect,
     pub switch_desc: Rect,
     pub toggle: Rect,
+    /// 开关下方的一行小字：下次重置：X 天后
+    pub next_reset: Rect,
     pub start_btn: Rect,
     pub stop_btn: Rect,
 }
@@ -195,13 +205,15 @@ impl Layout {
         let icon = r(PAD_X, (TITLE_BAR_H - 18.0) / 2.0, 18.0, 18.0);
         let close_x = win_w - 10.0 - WINBTN_W;
         let min_x = close_x - 8.0 - WINBTN_W;
+        let more_x = min_x - 8.0 - WINBTN_W;
         let btn_y = (TITLE_BAR_H - WINBTN_H) / 2.0;
         let btn_close = r(close_x, btn_y, WINBTN_W, WINBTN_H);
         let btn_min = r(min_x, btn_y, WINBTN_W, WINBTN_H);
+        let btn_more = r(more_x, btn_y, WINBTN_W, WINBTN_H);
         let title_text = Rect::new(
             icon.right() + s(4.0),
             title_bar.y,
-            (s(min_x) - icon.right() - s(4.0)).max(0),
+            (s(more_x) - icon.right() - s(4.0)).max(0),
             title_bar.h,
         );
         // 空矩形 = 还没摆。真实位置见 place_version_badge。
@@ -240,7 +252,7 @@ impl Layout {
         y += ROW_H + GAP;
 
         let password_label = r(inner_x, y, LABEL_W, ROW_H);
-        let reset_btn = r(inner_x + inner_w - RESET_W, y, RESET_W, ROW_H);
+        let copy_btn = r(inner_x + inner_w - RESET_W, y, RESET_W, ROW_H);
         let password_field = r(
             inner_x + LABEL_W + LABEL_GAP,
             y,
@@ -272,6 +284,10 @@ impl Layout {
         let toggle = r(inner_x + inner_w - TOGGLE_W, y + (SWITCH_ROW_H - TOGGLE_H) / 2.0, TOGGLE_W, TOGGLE_H);
         y += SWITCH_ROW_H + GAP;
 
+        // 密码轮换状态：一行小字，右对齐到卡片内边距
+        let next_reset = r(inner_x, y, inner_w, 15.0);
+        y += 15.0 + 6.0;
+
         let half = (inner_w - BTN_GAP) / 2.0;
         let start_btn = r(inner_x, y, half, BTN_ROW_H);
         let stop_btn = r(inner_x + half + BTN_GAP, y, half, BTN_ROW_H);
@@ -289,6 +305,7 @@ impl Layout {
             version_badge,
             btn_min,
             btn_close,
+            btn_more,
             status_card,
             status_dot,
             status_title,
@@ -302,10 +319,11 @@ impl Layout {
             password_edit,
             password_text,
             eye,
-            reset_btn,
+            copy_btn,
             switch_title,
             switch_desc,
             toggle,
+            next_reset,
             start_btn,
             stop_btn,
         }
@@ -324,8 +342,8 @@ impl Layout {
         let h = s(VER_BADGE_H);
 
         let x = self.title_text.x + title_w.max(0) + s(VER_BADGE_GAP);
-        // 右侧留出到最小化按钮的距离，别压上去
-        let limit = self.btn_min.x - s(VER_BADGE_GAP);
+        // 右侧留出到「三个点」按钮的距离，别压上去
+        let limit = self.btn_more.x - s(VER_BADGE_GAP);
         let w = (version_w.max(1) + pad * 2).min((limit - x).max(0));
 
         let y = self.title_bar.y + (self.title_bar.h - h) / 2;

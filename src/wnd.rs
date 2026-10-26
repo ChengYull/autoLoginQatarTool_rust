@@ -11,7 +11,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::{self, App, WM_RESET_DONE, WM_TRAY, WM_UPDATE_DONE, WM_UPDATE_READY};
+use crate::app::{self, App, WM_SETPWD_DONE, WM_TRAY, WM_UPDATE_DONE, WM_UPDATE_READY};
 use crate::backdrop;
 use crate::tlog;
 use crate::icon;
@@ -35,7 +35,8 @@ fn widget_of(id: usize) -> Option<Widget> {
     match id {
         app::ID_MIN => Some(Widget::Min),
         app::ID_CLOSE => Some(Widget::Close),
-        app::ID_RESET => Some(Widget::Reset),
+        app::ID_MORE => Some(Widget::More),
+        app::ID_COPY => Some(Widget::Copy),
         app::ID_START => Some(Widget::Start),
         app::ID_STOP => Some(Widget::Stop),
         app::ID_TOGGLE => Some(Widget::Toggle),
@@ -101,6 +102,11 @@ pub fn register_all(hinst: HINSTANCE) -> bool {
 
         // 卡片背景层（分层窗口）
         if !backdrop::register(hinst) {
+            return false;
+        }
+
+        // 密码对话框（1.0.5）
+        if !crate::dlg::register(hinst) {
             return false;
         }
     }
@@ -271,6 +277,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                     3 => app.on_verify_timer(),
                     4 => app.on_anim_timer(),
                     5 => app.on_update_timer(),
+                    6 => app.on_daily_tick(),
                     _ => {}
                 }
             }
@@ -306,7 +313,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                             _ => {}
                         }
                     }
-                    app::ID_RESET if code == BN_CLICKED => app.on_reset_password(),
+                    app::ID_COPY if code == BN_CLICKED => app.on_copy_password(),
                     app::ID_START if code == BN_CLICKED => app.enable_auto_login(),
                     app::ID_STOP if code == BN_CLICKED => app.disable_auto_login(),
                     app::ID_MIN | app::ID_CLOSE if code == BN_CLICKED => app.hide_to_tray(),
@@ -345,7 +352,12 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_MEASUREITEM => {
             if let Some(app) = app {
                 let mis = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
-                app.tray.measure_item(mis);
+                // 托盘菜单（2001-2005）与三点菜单（2101-2102）共用这两条消息，
+                // 靠 ID 段区分，别让两边互相覆盖尺寸
+                match mis.CtlID as usize {
+                    app::IDM_CUSTOM_PWD | app::IDM_AUTO_PWD => app.measure_more_menu_item(mis),
+                    _ => app.tray.measure_item(mis),
+                }
             }
             LRESULT(1)
         }
@@ -353,7 +365,10 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_DRAWITEM => {
             if let Some(app) = app {
                 let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                app.tray.draw_item(dis);
+                match dis.CtlID as usize {
+                    app::IDM_CUSTOM_PWD | app::IDM_AUTO_PWD => app.draw_more_menu_item(dis),
+                    _ => app.tray.draw_item(dis),
+                }
             }
             LRESULT(1)
         }
@@ -378,9 +393,9 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             LRESULT(0)
         }
 
-        WM_RESET_DONE => {
+        WM_SETPWD_DONE => {
             if let Some(app) = app {
-                app.on_reset_done();
+                app.on_set_pwd_done();
             }
             LRESULT(0)
         }
@@ -582,6 +597,8 @@ unsafe extern "system" fn widget_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, l
                             app.set_auto_start(next);
                         }
                         Some(Widget::Eye) => app.toggle_password_visible(),
+                        // 三点按钮直接弹菜单，不经过 WM_COMMAND
+                        Some(Widget::More) => app.on_more_menu(),
                         _ => {
                             let parent = GetParent(hwnd).unwrap_or_default();
                             let _ = SendMessageW(

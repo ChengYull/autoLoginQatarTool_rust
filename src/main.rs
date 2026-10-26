@@ -8,6 +8,7 @@
 mod app;
 mod automation;
 mod backdrop;
+mod dlg;
 mod gfx;
 mod icon;
 mod model;
@@ -15,6 +16,7 @@ mod net;
 mod paint;
 mod preview;
 mod process;
+mod pwd;
 mod settings;
 mod theme;
 mod trace;
@@ -92,6 +94,27 @@ fn main() {
         let _ = UpdateWindow(hwnd);
     }
     tlog!("主窗口已显示");
+
+    // 调试入口：直接打开密码对话框，方便在没有鼠标的环境下核对视觉
+    if let Some(idx) = args.iter().position(|a| a == "--open-dialog") {
+        let kind = match args.get(idx + 1).map(|s| s.as_str()) {
+            Some("auto") => dlg::Kind::Auto,
+            _ => dlg::Kind::Custom,
+        };
+        let sample: Vec<String> = (0..pwd::POOL_SIZE)
+            .map(|i| format!("TestPass{}a.", i))
+            .collect();
+        let _ = dlg::open(
+            hwnd,
+            hinst,
+            dpi,
+            kind,
+            "12322106",
+            &sample,
+            true,
+            "下次重置：6 天后",
+        );
+    }
 
     if trace::enabled() {
         // 自检模式：4 秒后自动退出

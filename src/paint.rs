@@ -1,7 +1,7 @@
 //! 界面绘制。所有组件都对齐原版 QSS 的配色与圆角。
 
-use crate::gfx::{ALIGN_CENTER, ALIGN_LEFT, Canvas, Fonts};
-use crate::icon::{draw_camera, draw_eye};
+use crate::gfx::{ALIGN_CENTER, ALIGN_LEFT, ALIGN_RIGHT, Canvas, Fonts};
+use crate::icon::{draw_camera, draw_copy, draw_eye, draw_more};
 use crate::model::{BtnKind, LoginState, Widget};
 use crate::theme::*;
 use crate::util::{Rect, rgb, rgba};
@@ -25,7 +25,9 @@ pub struct VisualState<'a> {
     /// 主按钮是否可用
     pub start_enabled: bool,
     pub stop_enabled: bool,
-    pub reset_enabled: bool,
+    pub copy_enabled: bool,
+    /// 开关下方那行「下次重置：X 天后」（1.0.5）
+    pub next_reset: String,
     /// 当前版本相对服务端的状态，决定标题栏版本徽章的颜色（绿 = 最新，黄 = 有更新）
     pub version_state: VersionState,
     /// 正在下载 / 安装更新（状态徽章改成「更新中」）
@@ -77,6 +79,7 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     canvas.text("密码", l.password_label, f.label, rgb(LABEL), ALIGN_LEFT);
     canvas.text("开机自启动", l.switch_title, f.label, rgb(LABEL), ALIGN_LEFT);
     canvas.text("随 Windows 启动后常驻系统托盘", l.switch_desc, f.small, rgb(SWITCH_DESC), ALIGN_LEFT);
+    canvas.text(&vs.next_reset, l.next_reset, f.small, rgb(SWITCH_DESC), ALIGN_RIGHT);
 
     // 输入框外框
     paint_field(
@@ -105,6 +108,12 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
     // 标题栏按钮
     paint_button(canvas, f, l.btn_min, BtnKind::WinMin, "—", l.scale, vs.hovered(Widget::Min), vs.pressed(Widget::Min), false);
     paint_button(canvas, f, l.btn_close, BtnKind::WinClose, "✕", l.scale, vs.hovered(Widget::Close), vs.pressed(Widget::Close), false);
+    paint_button(canvas, f, l.btn_more, BtnKind::WinHover, "", l.scale, vs.hovered(Widget::More), vs.pressed(Widget::More), false);
+    draw_more(
+        canvas,
+        centered_icon(l.btn_more, 16.0, l.scale),
+        if vs.hovered(Widget::More) || vs.pressed(Widget::More) { WINBTN_MIN_HOVER_FG } else { WINBTN_FG },
+    );
 
     // 输入框内容。用整行矩形而不是 EDIT 的矩形：DT_VCENTER 会把字高盒子
     // 居中，而原生 EDIT 是顶对齐 —— 两者只有基于「整行」时才落在同一条基线上。
@@ -119,7 +128,24 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
         if vs.fields_enabled { WINBTN_FG } else { INPUT_DISABLED_TEXT },
         1.8 * l.scale,
     );
-    paint_button(canvas, f, l.reset_btn, BtnKind::Reset, "重置", l.scale, vs.hovered(Widget::Reset), vs.pressed(Widget::Reset), !vs.reset_enabled);
+    paint_button(canvas, f, l.copy_btn, BtnKind::Ghost, "", l.scale, vs.hovered(Widget::Copy), vs.pressed(Widget::Copy), !vs.copy_enabled);
+    // 图标底色必须和 Ghost 按钮当前状态的底色一致，否则那块填充会像补丁
+    let copy_bg = if !vs.copy_enabled {
+        INPUT_DISABLED_BG
+    } else if vs.pressed(Widget::Copy) {
+        RESET_PRESSED_BG
+    } else if vs.hovered(Widget::Copy) {
+        RESET_HOVER_BG
+    } else {
+        INPUT_BG
+    };
+    draw_copy(
+        canvas,
+        centered_icon(l.copy_btn, 15.0, l.scale),
+        if vs.copy_enabled { RESET_FG } else { RESET_DISABLED_FG },
+        copy_bg,
+        1.5 * l.scale,
+    );
 
     // 开机自启开关
     paint_toggle(canvas, l.toggle, vs.toggle_pos);
@@ -131,9 +157,7 @@ pub fn paint_all(canvas: &Canvas, l: &Layout, f: &Fonts, vs: &VisualState, widge
 
 // ---------------------------------------------------------------------------
 // 版本徽章
-// ---------------------------------------------------------------------------
-
-/// 标题右侧的版本徽章。
+// ---------------------------------------------------------------------------/// 标题右侧的版本徽章。
 ///
 /// 外观与状态卡片里的「运行中」徽章一致（胶囊圆角 + 浅底深字），只用颜色区分新旧：
 /// 绿色 = 当前已是最新，黄色 = 服务端上有更新版本。未摆放时（宽 0）不画。
@@ -273,7 +297,12 @@ pub fn paint_button(
                 );
             }
         }
-        BtnKind::Reset => {
+        BtnKind::WinHover => {
+            if hovered || pressed {
+                canvas.fill_round_rect(r, 7.0 * scale, rgb(WINBTN_MIN_HOVER_BG));
+            }
+        }
+        BtnKind::Ghost => {
             let (bg, border, fg) = if disabled {
                 (INPUT_DISABLED_BG, INPUT_DISABLED_BORDER, RESET_DISABLED_FG)
             } else if pressed {
@@ -333,6 +362,12 @@ pub fn paint_toggle(canvas: &Canvas, r: Rect, position: f32) {
         Rect::new(knob_x, r.y + margin, knob_d, knob_d),
         rgb(TOGGLE_KNOB),
     );
+}
+
+/// 在矩形里居中放一个正方形图标
+fn centered_icon(r: Rect, size: f32, scale: f32) -> Rect {
+    let s = (size * scale).round().max(8.0) as i32;
+    Rect::new(r.cx() - s / 2, r.cy() - s / 2, s, s)
 }
 
 fn mix(from: u32, to: u32, t: f32) -> u32 {

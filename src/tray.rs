@@ -118,6 +118,25 @@ impl Tray {
         }
     }
 
+    /// 弹一个托盘气泡。用于「密码已复制」「密码已自动重置」这类
+    /// 不该打断用户、但必须让他知道的反馈。
+    pub fn balloon(&self, title: &str, text: &str) {
+        if !self.added {
+            return;
+        }
+        let mut nid = self.notify_data(NIF_INFO);
+        nid.dwInfoFlags = NIIF_INFO;
+        let t = to_wide(title);
+        let n = t.len().saturating_sub(1).min(nid.szInfoTitle.len() - 1);
+        nid.szInfoTitle[..n].copy_from_slice(&t[..n]);
+        let m = to_wide(text);
+        let n = m.len().saturating_sub(1).min(nid.szInfo.len() - 1);
+        nid.szInfo[..n].copy_from_slice(&m[..n]);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+    }
+
     pub fn set_status(&mut self, text: &str, running: bool) {
         self.status_text = text.to_string();
         self.running = running;

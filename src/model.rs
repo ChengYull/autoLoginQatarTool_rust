@@ -25,7 +25,10 @@ pub enum LoginTarget {
 pub enum Widget {
     Min,
     Close,
-    Reset,
+    /// 标题栏「三个点」：点开密码相关菜单（1.0.5）
+    More,
+    /// 密码行右侧的复制按钮（1.0.5，取代原来的「重置」）
+    Copy,
     Start,
     Stop,
     Toggle,
@@ -37,7 +40,11 @@ pub enum Widget {
 pub enum BtnKind {
     WinMin,
     WinClose,
-    Reset,
+    /// 只画 hover 底色，不画任何图形 —— 给「三个点」这类自己绘制图标的标题栏按钮用。
+    /// 复用 WinMin 会把最小化那条横线也画出来，跟图标叠在一起。
+    WinHover,
+    /// 无边框的幽灵按钮：只有 hover 底色，用于图标按钮
+    Ghost,
     Primary,
     Secondary,
 }

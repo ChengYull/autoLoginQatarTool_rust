@@ -11,7 +11,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::SystemInformation::GetTickCount64;
-use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, EM_SETPASSWORDCHAR};
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -21,7 +21,7 @@ use crate::backdrop::Backdrop;
 use crate::gfx::{text_width, Canvas, Fonts};
 use crate::icon;
 use crate::model::{LoginState, LoginTarget, Widget};
-use crate::net::{self, ResetResult};
+use crate::net;
 use crate::paint::{paint_all, paint_button, paint_toggle, VisualState};
 use crate::process;
 use crate::settings::{self, Settings};
@@ -46,12 +46,14 @@ pub const APP_NAME: &str = "AutoLoginQatarTool";
 pub const ID_ACCOUNT: usize = 1001;
 pub const ID_PASSWORD: usize = 1002;
 pub const ID_EYE: usize = 1003;
-pub const ID_RESET: usize = 1004;
+pub const ID_COPY: usize = 1004;
 pub const ID_TOGGLE: usize = 1005;
 pub const ID_START: usize = 1006;
 pub const ID_STOP: usize = 1007;
 pub const ID_MIN: usize = 1008;
 pub const ID_CLOSE: usize = 1009;
+/// 标题栏「三个点」：密码相关菜单（1.0.5）
+pub const ID_MORE: usize = 1010;
 
 // 托盘菜单命令 ID
 pub const IDM_STATUS: usize = 2001;
@@ -61,6 +63,11 @@ pub const IDM_EXIT: usize = 2004;
 /// 「检查更新」：托盘菜单和版本徽章的右键菜单共用同一个命令 ID
 pub const IDM_CHECK_UPDATE: usize = 2005;
 
+/// 三点菜单（1.0.5）。ID 段与托盘菜单（2001-2005）错开，
+/// WM_DRAWITEM / WM_MEASUREITEM 靠这个区分该走哪套绘制。
+pub const IDM_CUSTOM_PWD: usize = 2101;
+pub const IDM_AUTO_PWD: usize = 2102;
+
 // 定时器
 const TIMER_POLL: usize = 1;
 const TIMER_LOGIN: usize = 2;
@@ -68,6 +75,11 @@ const TIMER_VERIFY: usize = 3;
 const TIMER_ANIM: usize = 4;
 /// 更新检查：先是一次性的"启动后延迟几秒"，之后改成 6 小时一轮
 const TIMER_UPDATE: usize = 5;
+/// 密码轮换检查（1.0.5）。用 60 秒粒度轮询当前时间，
+/// 而不是 SetTimer 到「明天 8 点」—— 定时器不累积睡眠时间，
+/// 笔记本合盖一晚就会漂；轮询同时还能抗「用户改系统时间」。
+const TIMER_DAILY: usize = 6;
+const DAILY_TICK_MS: u32 = 60_000;
 
 /// 轮询间隔（毫秒）
 const POLL_INTERVAL_MS: u32 = 500;
@@ -80,10 +92,26 @@ const PACKER_MAX_VERIFY: i32 = 6;
 const TOGGLE_ANIM_MS: u64 = 140;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
-pub const WM_RESET_DONE: u32 = WM_APP + 2;
 pub const WM_UPDATE_DONE: u32 = WM_APP + 3;
 /// 更新包已下载完毕（后台线程 → 界面线程）
 pub const WM_UPDATE_READY: u32 = WM_APP + 4;
+/// 设置密码请求返回（1.0.5）
+pub const WM_SETPWD_DONE: u32 = WM_APP + 5;
+
+/// 一次「设置密码」请求的上下文
+pub enum PwdJob {
+    /// 用户在「自定义密码」里手动设置
+    Custom,
+    /// 自动轮换：成功后要推进池下标
+    Auto { index: usize },
+}
+
+pub struct PwdCtx {
+    pub job: PwdJob,
+    pub pwd: String,
+    /// 自动轮换时还没试过的候选（撞上「最近一个月使用过」就换下一个）
+    pub remaining: Vec<usize>,
+}
 
 
 // ---------------------------------------------------------------------------
@@ -117,12 +145,14 @@ pub struct App {
     pub h_account: HWND,
     pub h_password: HWND,
     pub h_eye: HWND,
-    pub h_reset: HWND,
+    pub h_copy: HWND,
     pub h_toggle: HWND,
     pub h_start: HWND,
     pub h_stop: HWND,
     pub h_min: HWND,
     pub h_close: HWND,
+    /// 标题栏「三个点」
+    pub h_more: HWND,
 
     // 业务状态
     pub login_state: LoginState,
@@ -133,6 +163,9 @@ pub struct App {
     pub account: String,
     pub password: String,
     pub auto_start: bool,
+    /// 7 个密码的轮换池（1.0.5）。`pool.is_configured()` 为 false 时
+    /// 表示用户还没配置过，自动重置必须完全不动手。
+    pub pool: crate::pwd::Pool,
     pub password_visible: bool,
     pub packer_verify_count: i32,
 
@@ -156,9 +189,13 @@ pub struct App {
     pub taskbar_created_msg: u32,
     pub tray_tip: String,
 
-    // 重置密码请求
-    pub reset_busy: bool,
-    reset_rx: Option<mpsc::Receiver<ResetResult>>,
+    // 设置密码请求（1.0.5）
+    /// 有模态对话框开着。此时主窗口被禁用，定时器仍会跑 ——
+    /// 自动重置必须让路，否则会在对话框上面再叠一个提示框。
+    pub dialog_open: bool,
+    pub pwd_busy: bool,
+    pwd_rx: Option<mpsc::Receiver<net::SetPwdResult>>,
+    pwd_ctx: Option<PwdCtx>,
 
     /// 更新检查的结果回传通道（检查在后台线程里做）
     update_rx: Option<mpsc::Receiver<UpdateOutcome>>,
@@ -205,18 +242,20 @@ impl App {
             h_account: HWND::default(),
             h_password: HWND::default(),
             h_eye: HWND::default(),
-            h_reset: HWND::default(),
+            h_copy: HWND::default(),
             h_toggle: HWND::default(),
             h_start: HWND::default(),
             h_stop: HWND::default(),
             h_min: HWND::default(),
             h_close: HWND::default(),
+            h_more: HWND::default(),
             login_state: LoginState::Stopped,
             version_state: version::detect_state(),
             active_target: LoginTarget::Qatar,
             account: saved.account,
             password: saved.password,
             auto_start: saved.auto_start,
+            pool: saved.pool,
             password_visible: false,
             packer_verify_count: 0,
             hover: None,
@@ -233,14 +272,16 @@ impl App {
             hicon,
             taskbar_created_msg,
             tray_tip: String::new(),
-            reset_rx: None,
+            dialog_open: false,
+            pwd_busy: false,
+            pwd_rx: None,
+            pwd_ctx: None,
             update_rx: None,
             update_info: None,
             updating: false,
             badge_hover: false,
             install_rx: None,
             manual_check: false,
-            reset_busy: false,
             brush_white: unsafe { CreateSolidBrush(COLORREF(colorref(theme::INPUT_BG))) },
             brush_disabled: unsafe {
                 CreateSolidBrush(COLORREF(colorref(theme::INPUT_DISABLED_BG)))
@@ -272,6 +313,9 @@ impl App {
         };
         unsafe {
             let _ = SetTimer(Some(self.hwnd), TIMER_UPDATE, delay, None);
+            // 密码轮换检查：启动后 3 秒先查一次（把「启动时检测」和「每天 8 点」
+            // 合成同一条逻辑），之后每分钟一次
+            let _ = SetTimer(Some(self.hwnd), TIMER_DAILY, 3_000, None);
         }
     }
 
@@ -332,12 +376,13 @@ impl App {
 
             // 自绘子控件
             self.h_eye = self.create_widget(EYE_CLASS, ID_EYE, l.eye);
-            self.h_reset = self.create_widget(BTN_CLASS, ID_RESET, l.reset_btn);
+            self.h_copy = self.create_widget(BTN_CLASS, ID_COPY, l.copy_btn);
             self.h_toggle = self.create_widget(TOGGLE_CLASS, ID_TOGGLE, l.toggle);
             self.h_start = self.create_widget(BTN_CLASS, ID_START, l.start_btn);
             self.h_stop = self.create_widget(BTN_CLASS, ID_STOP, l.stop_btn);
             self.h_min = self.create_widget(BTN_CLASS, ID_MIN, l.btn_min);
             self.h_close = self.create_widget(BTN_CLASS, ID_CLOSE, l.btn_close);
+            self.h_more = self.create_widget(BTN_CLASS, ID_MORE, l.btn_more);
 
             // 初始文本
             let account = to_wide(&self.account);
@@ -407,12 +452,13 @@ impl App {
             (self.h_account, l.account_edit),
             (self.h_password, l.password_edit),
             (self.h_eye, l.eye),
-            (self.h_reset, l.reset_btn),
+            (self.h_copy, l.copy_btn),
             (self.h_toggle, l.toggle),
             (self.h_start, l.start_btn),
             (self.h_stop, l.stop_btn),
             (self.h_min, l.btn_min),
             (self.h_close, l.btn_close),
+            (self.h_more, l.btn_more),
         ];
         unsafe {
             for (hwnd, r) in items {
@@ -490,10 +536,30 @@ impl App {
             password_hover: self.password_hover,
             start_enabled: self.login_state == LoginState::Stopped,
             stop_enabled: self.login_state != LoginState::Stopped,
-            reset_enabled: !self.reset_busy,
+            copy_enabled: !self.password.is_empty(),
+            next_reset: self.next_reset_text(),
             version_state: self.version_state,
             updating: self.updating,
             badge_hover: self.badge_hover,
+        }
+    }
+
+    /// 开关下方那行小字的文案
+    pub fn next_reset_text(&self) -> String {
+        if !self.pool.is_configured() {
+            return "未配置密码轮换，点右上角 ···".into();
+        }
+        if !self.pool.auto {
+            return "自动重置已暂停".into();
+        }
+        if self.pool.last_reset <= 0 {
+            return "下次重置：保存后生效".into();
+        }
+        let days = self.pool.days_until_due(crate::pwd::now_unix());
+        if days <= 0 {
+            "下次重置：即将执行".into()
+        } else {
+            format!("下次重置：{} 天后", days)
         }
     }
 
@@ -749,7 +815,7 @@ impl App {
         for hwnd in [
             self.h_min,
             self.h_close,
-            self.h_reset,
+            self.h_copy,
             self.h_start,
             self.h_stop,
             self.h_toggle,
@@ -816,17 +882,65 @@ impl App {
                 self.pressed == Some(Widget::Close),
                 false,
             ),
-            ID_RESET => paint_button(
-                &canvas,
-                &self.fonts,
-                Rect::new(0, 0, l.reset_btn.w, l.reset_btn.h),
-                crate::model::BtnKind::Reset,
-                "重置",
-                l.scale,
-                self.hover == Some(Widget::Reset),
-                self.pressed == Some(Widget::Reset),
-                self.reset_busy,
-            ),
+            ID_COPY => {
+                let hovered = self.hover == Some(Widget::Copy);
+                let pressed = self.pressed == Some(Widget::Copy);
+                let enabled = !self.password.is_empty();
+                paint_button(
+                    &canvas,
+                    &self.fonts,
+                    Rect::new(0, 0, l.copy_btn.w, l.copy_btn.h),
+                    crate::model::BtnKind::Ghost,
+                    "",
+                    l.scale,
+                    hovered,
+                    pressed,
+                    !enabled,
+                );
+                // 图标底色必须跟 Ghost 按钮当前状态的底色一致，否则会露出一个色块
+                let bg = if !enabled {
+                    theme::INPUT_DISABLED_BG
+                } else if pressed {
+                    theme::RESET_PRESSED_BG
+                } else if hovered {
+                    theme::RESET_HOVER_BG
+                } else {
+                    theme::INPUT_BG
+                };
+                let size = (15.0 * l.scale).round().max(8.0) as i32;
+                icon::draw_copy(
+                    &canvas,
+                    Rect::new((l.copy_btn.w - size) / 2, (l.copy_btn.h - size) / 2, size, size),
+                    if enabled { theme::RESET_FG } else { theme::RESET_DISABLED_FG },
+                    bg,
+                    1.5 * l.scale,
+                );
+            }
+            ID_MORE => {
+                let hovered = self.hover == Some(Widget::More);
+                let pressed = self.pressed == Some(Widget::More);
+                paint_button(
+                    &canvas,
+                    &self.fonts,
+                    Rect::new(0, 0, l.btn_more.w, l.btn_more.h),
+                    crate::model::BtnKind::WinHover,
+                    "",
+                    l.scale,
+                    hovered,
+                    pressed,
+                    false,
+                );
+                let size = (16.0 * l.scale).round().max(8.0) as i32;
+                icon::draw_more(
+                    &canvas,
+                    Rect::new((l.btn_more.w - size) / 2, (l.btn_more.h - size) / 2, size, size),
+                    if hovered || pressed {
+                        theme::WINBTN_MIN_HOVER_FG
+                    } else {
+                        theme::WINBTN_FG
+                    },
+                );
+            }
             ID_START => paint_button(
                 &canvas,
                 &self.fonts,
@@ -884,7 +998,7 @@ impl App {
             let _ = EnableWindow(self.h_eye, stopped);
             let _ = EnableWindow(self.h_start, stopped);
             let _ = EnableWindow(self.h_stop, !stopped);
-            let _ = EnableWindow(self.h_reset, !self.reset_busy);
+            let _ = EnableWindow(self.h_copy, !self.password.is_empty());
         }
     }
 
@@ -903,7 +1017,7 @@ impl App {
         self.repaint_child(self.h_start);
         self.repaint_child(self.h_stop);
         self.repaint_child(self.h_eye);
-        self.repaint_child(self.h_reset);
+        self.repaint_child(self.h_copy);
     }
 
     fn refresh_tray_tip(&mut self) {
@@ -968,6 +1082,11 @@ impl App {
 
     /// 轮询到目标进程
     pub fn on_poll(&mut self) {
+        // 密码对话框开着时暂停轮询：这时候去填登录框会抢焦点，
+        // 而且登录失败弹的提示框会盖在对话框上，用户连自己在填什么都看不见。
+        if self.dialog_open {
+            return;
+        }
         if self.login_state != LoginState::Running {
             return;
         }
@@ -1105,53 +1224,402 @@ impl App {
     }
 
     // -----------------------------------------------------------------------
-    // 重置密码
+    // 密码管理（1.0.5）
     // -----------------------------------------------------------------------
 
-    pub fn on_reset_password(&mut self) {
+    /// 密码行右侧的复制按钮：把当前密码写进剪贴板
+    pub fn on_copy_password(&mut self) {
+        if self.password.is_empty() {
+            return;
+        }
+        let ok = crate::util::copy_to_clipboard(&self.password);
+        crate::tlog!("复制当前密码 -> {}", ok);
+        if ok {
+            self.tray.balloon("已复制", "当前密码已复制到剪贴板。");
+        } else {
+            self.error_box("复制失败", "剪贴板被其他程序占用，请稍后再试。");
+        }
+    }
+
+    /// 标题栏「三个点」：在按钮正下方弹出菜单
+    pub fn on_more_menu(&mut self) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+
+            // 白底 + 圆角项，与托盘菜单同一套观感
+            let brush = CreateSolidBrush(COLORREF(colorref(theme::MENU_BG)));
+            let info = MENUINFO {
+                cbSize: std::mem::size_of::<MENUINFO>() as u32,
+                fMask: MIM_BACKGROUND,
+                dwStyle: MENUINFO_STYLE(0),
+                cyMax: 0,
+                hbrBack: brush,
+                dwContextHelpID: 0,
+                dwMenuData: 0,
+            };
+            let _ = SetMenuInfo(menu, &info);
+
+            // owner-draw 项的 lpNewItem 位置用来携带命令 ID（与托盘菜单一致的做法）
+            let _ = AppendMenuW(
+                menu,
+                MF_OWNERDRAW,
+                IDM_CUSTOM_PWD,
+                PCWSTR(IDM_CUSTOM_PWD as *const u16),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_OWNERDRAW,
+                IDM_AUTO_PWD,
+                PCWSTR(IDM_AUTO_PWD as *const u16),
+            );
+
+            let mut rc = RECT::default();
+            let _ = GetWindowRect(self.h_more, &mut rc);
+            // 弹出前抢前台，否则点别处菜单不会自动消失
+            let _ = SetForegroundWindow(self.hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                rc.left,
+                rc.bottom + 2,
+                None,
+                self.hwnd,
+                None,
+            );
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+
+            match cmd.0 as usize {
+                IDM_CUSTOM_PWD => self.open_custom_password_dialog(),
+                IDM_AUTO_PWD => self.open_auto_password_dialog(),
+                _ => {}
+            }
+        }
+    }
+
+    /// 三点菜单项的尺寸
+    pub fn measure_more_menu_item(&self, mis: &mut MEASUREITEMSTRUCT) {
+        let scale = self.layout.scale;
+        mis.itemHeight = (30.0 * scale) as u32;
+        mis.itemWidth = (150.0 * scale) as u32;
+    }
+
+    /// 三点菜单项的自绘
+    pub fn draw_more_menu_item(&self, dis: &DRAWITEMSTRUCT) {
+        use crate::gfx::{draw_text, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER};
+        use windows::Win32::UI::Controls::ODS_SELECTED;
+
+        let rc = dis.rcItem;
+        let rect = Rect::new(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+        let selected = (dis.itemState.0 & ODS_SELECTED.0) != 0;
+
+        if selected {
+            if let Some(canvas) = Canvas::from_hdc(dis.hDC) {
+                canvas.fill_round_rect(
+                    Rect::new(rect.x + 4, rect.y + 1, rect.w - 8, rect.h - 2),
+                    6.0,
+                    crate::util::rgb(theme::MENU_SEL_BG),
+                );
+            }
+        }
+
+        let text = match dis.CtlID as usize {
+            IDM_CUSTOM_PWD => "自定义密码",
+            IDM_AUTO_PWD => "自动重置密码",
+            _ => "",
+        };
+        let fg = if selected { theme::MENU_SEL_FG } else { theme::MENU_FG };
+        draw_text(
+            dis.hDC,
+            text,
+            Rect::new(rect.x + 14, rect.y, rect.w - 20, rect.h),
+            self.fonts.body,
+            fg,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX,
+        );
+    }
+
+    /// 打开「自定义密码」对话框：单次手动设置
+    fn open_custom_password_dialog(&mut self) {
+        let dpi = window_dpi(self.hwnd);
+        self.dialog_open = true;
+        let out = crate::dlg::open(
+            self.hwnd,
+            self.hinst,
+            dpi,
+            crate::dlg::Kind::Custom,
+            &self.account,
+            &[],
+            false,
+            "",
+        );
+        self.dialog_open = false;
+        let Some(out) = out else {
+            return;
+        };
+        let Some(pwd) = out.passwords.into_iter().next() else {
+            return;
+        };
+        let ctx = PwdCtx {
+            job: PwdJob::Custom,
+            pwd: pwd.clone(),
+            remaining: Vec::new(),
+        };
+        self.start_set_password(pwd, ctx);
+    }
+
+    /// 打开「自动重置密码」对话框：7 个密码 + 轮换开关
+    fn open_auto_password_dialog(&mut self) {
+        let dpi = window_dpi(self.hwnd);
+        let current: Vec<String> = self.pool.list.to_vec();
+        let next_text = self.next_reset_text();
+        self.dialog_open = true;
+        let out = crate::dlg::open(
+            self.hwnd,
+            self.hinst,
+            dpi,
+            crate::dlg::Kind::Auto,
+            &self.account,
+            &current,
+            self.pool.auto,
+            &next_text,
+        );
+        self.dialog_open = false;
+        let Some(out) = out else {
+            return;
+        };
+
+        for (i, p) in out.passwords.iter().enumerate() {
+            if i < crate::pwd::POOL_SIZE {
+                self.pool.list[i] = p.clone();
+            }
+        }
+        self.pool.auto = out.auto;
+        self.pool.index = 0;
+
+        let now = crate::pwd::now_unix();
+        let first = self.pool.list[0].clone();
+        // 第 1 个就是当前密码时不需要调接口：服务端已经是它了，
+        // 再设一次反而会被「该密码在最近一个月使用过」拒掉。
+        let same_as_current = first == self.password;
+        let apply_now = if same_as_current {
+            true
+        } else {
+            (unsafe {
+                MessageBoxW(
+                    Some(self.hwnd),
+                    windows::core::w!(
+                        "是否立即把第 1 个密码设为当前密码？\n\n选「否」则从现在开始计时，7 天后自动切换到第 2 个。"
+                    ),
+                    windows::core::w!("自动重置密码"),
+                    MB_YESNO | MB_ICONQUESTION,
+                )
+            }) == IDYES
+        };
+
+        // 不管应不应用，计时都从此刻开始：第 1 个就是「当前密码」的语义
+        if same_as_current {
+            self.pool.mark_current_in_use(now);
+        } else {
+            self.pool.last_reset = now;
+            self.pool.used[0] = now;
+        }
+        self.save_settings();
+        self.repaint();
+
+        if apply_now && !same_as_current {
+            let ctx = PwdCtx {
+                job: PwdJob::Auto { index: 0 },
+                pwd: first.clone(),
+                remaining: Vec::new(),
+            };
+            self.start_set_password(first, ctx);
+        }
+    }
+
+    /// 起一次后台「设置密码」请求
+    pub fn start_set_password(&mut self, pwd: String, ctx: PwdCtx) {
         let uid = self.account.trim().to_string();
         if uid.is_empty() {
-            self.warning_box("账户为空", "请先填写账户，再重置密码。");
+            self.warning_box("账户为空", "请先填写账户，再设置密码。");
+            return;
+        }
+        if self.pwd_busy {
             return;
         }
 
         let (tx, rx) = mpsc::channel();
-        self.reset_rx = Some(rx);
-        self.reset_busy = true;
-        self.update_status_ui();
+        self.pwd_rx = Some(rx);
+        self.pwd_busy = true;
+        self.pwd_ctx = Some(ctx);
 
         let hwnd_raw = self.hwnd.0 as isize;
         std::thread::spawn(move || {
-            let result = net::reset_password(&uid);
+            let result = net::set_password(&uid, &pwd);
             let _ = tx.send(result);
             unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd_raw as *mut c_void)), WM_RESET_DONE, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_raw as *mut c_void)),
+                    WM_SETPWD_DONE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
             }
         });
     }
 
-    pub fn on_reset_done(&mut self) {
-        self.reset_busy = false;
-        let result = self.reset_rx.as_ref().and_then(|rx| rx.try_recv().ok());
-        self.reset_rx = None;
-        self.update_status_ui();
+    pub fn on_set_pwd_done(&mut self) {
+        self.pwd_busy = false;
+        let result = self.pwd_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        self.pwd_rx = None;
+        let Some(ctx) = self.pwd_ctx.take() else {
+            return;
+        };
 
         match result {
-            Some(ResetResult::Body(body)) => {
-                if body == "1" {
-                    self.info_box("重置成功", "密码已重置，新密码将通过钉钉发送，请查收。");
-                } else if body.is_empty() {
-                    self.error_box("重置失败", "接口未返回内容，请检查网络或接口地址。");
-                } else {
-                    self.error_box("重置失败", &format!("接口返回异常：{}", body));
-                }
+            Some(net::SetPwdResult::Ok) => self.on_pwd_success(ctx),
+
+            // 服务端说「该密码在最近一个月使用过」：换下一个候选再试。
+            // 这是唯一能自愈的失败 —— 其余错误都该让用户看到原文。
+            Some(net::SetPwdResult::Rejected(msg))
+                if matches!(ctx.job, PwdJob::Auto { .. })
+                    && net::is_reuse_rejection(&msg)
+                    && !ctx.remaining.is_empty() =>
+            {
+                let mut remaining = ctx.remaining;
+                let next = remaining.remove(0);
+                let pwd = self.pool.list[next].clone();
+                crate::tlog!("密码已在最近一个月用过，改试第 {} 个", next + 1);
+                let ctx = PwdCtx {
+                    job: PwdJob::Auto { index: next },
+                    pwd: pwd.clone(),
+                    remaining,
+                };
+                self.start_set_password(pwd, ctx);
             }
-            Some(ResetResult::Failed(err)) => {
-                self.error_box("重置失败", &format!("请求失败：{}", err));
+
+            Some(net::SetPwdResult::Rejected(msg)) => {
+                self.error_box("设置密码失败", &msg);
+            }
+            Some(net::SetPwdResult::Failed(err)) => {
+                self.error_box("设置密码失败", &format!("请求失败：{}", err));
             }
             None => {}
         }
     }
+
+    fn on_pwd_success(&mut self, ctx: PwdCtx) {
+        let now = crate::pwd::now_unix();
+        self.password = ctx.pwd.clone();
+        // 必须把新密码同步回输入框。不同步的话界面还显示旧密码，
+        // 用户会以为没生效；更糟的是他随手编辑一下，EN_CHANGE 会把旧值
+        // 读回 self.password，本地和服务端就此错开。
+        self.syncing = true;
+        let wide = to_wide(&self.password);
+        unsafe {
+            let _ = SetWindowTextW(self.h_password, PCWSTR(wide.as_ptr()));
+        }
+        self.syncing = false;
+
+        match ctx.job {
+            PwdJob::Custom => {
+                // 手动改密码也会重置服务端的 7 天计时，本地基准要跟着走，
+                // 否则下次自动重置会算错时间。
+                if self.pool.is_configured() {
+                    match self.pool.list.iter().position(|p| p == &ctx.pwd) {
+                        Some(i) => self.pool.mark_active(i, now),
+                        None => self.pool.last_reset = now,
+                    }
+                }
+                self.save_settings();
+                self.repaint();
+                self.info_box(
+                    "设置成功",
+                    "新密码已生效，本地登录密码已同步更新。",
+                );
+            }
+            PwdJob::Auto { index } => {
+                self.pool.mark_active(index, now);
+                self.save_settings();
+                self.repaint();
+                self.tray.balloon("密码已自动重置", &format!("已切换到第 {} 个密码", index + 1));
+                self.info_box(
+                    "密码已重置",
+                    &format!(
+                        "已切换到第 {} 个密码：\n\n{}\n\n本地登录密码已同步更新。",
+                        index + 1,
+                        ctx.pwd
+                    ),
+                );
+            }
+        }
+    }
+
+    /// 密码轮换检查：启动后 3 秒先跑一次，之后每分钟一次。
+    ///
+    /// 这里把「启动时检测」和「每天早上 8 点检测」合并成同一条逻辑：
+    /// 每分钟看一次「是否到期」，到期就动手。比起盯着 8 点这个时刻，
+    /// 这样既不会漏（睡眠 / 关机 / 改时间都不影响），也不会在 8 点整
+    /// 跟其他启动项挤在一起。
+    pub fn on_daily_tick(&mut self) {
+        unsafe {
+            // 首次是 3 秒（快速响应启动），之后固定 60 秒
+            let _ = KillTimer(Some(self.hwnd), TIMER_DAILY);
+            let _ = SetTimer(Some(self.hwnd), TIMER_DAILY, DAILY_TICK_MS, None);
+        }
+
+        // 天数会跨过零点，「下次重置：X 天后」需要跟着刷新
+        self.repaint();
+
+        if self.pwd_busy || self.dialog_open {
+            return;
+        }
+        if !self.pool.is_configured() || !self.pool.auto {
+            return;
+        }
+        if self.account.trim().is_empty() {
+            return;
+        }
+        // 正在往登录框里填密码时不能改服务端密码，否则填进去的是旧的，
+        // 必然登录失败。等这一轮走完再重置。
+        if self.login_state == LoginState::Handling {
+            return;
+        }
+
+        let now = crate::pwd::now_unix();
+        if !self.pool.is_due(now) {
+            return;
+        }
+
+        let candidates = self.pool.candidates(now);
+        let Some(&first) = candidates.first() else {
+            self.pool.auto = false;
+            self.save_settings();
+            self.error_box(
+                "无法自动重置",
+                "7 个密码都在最近一个月内使用过，服务端会拒绝。请到「自动重置密码」里更新密码列表。",
+            );
+            return;
+        };
+
+        let mut remaining = candidates;
+        remaining.remove(0);
+        let pwd = self.pool.list[first].clone();
+        crate::tlog!("到期自动重置，改用第 {} 个密码", first + 1);
+        let ctx = PwdCtx {
+            job: PwdJob::Auto { index: first },
+            pwd: pwd.clone(),
+            remaining,
+        };
+        self.start_set_password(pwd, ctx);
+    }
+
+    // -----------------------------------------------------------------------
+    // 重置密码
+    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // 开关动画
@@ -1224,6 +1692,7 @@ impl App {
             account: self.account.clone(),
             password: self.password.clone(),
             auto_start: self.auto_start,
+            pool: self.pool.clone(),
         };
         s.save();
 

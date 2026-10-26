@@ -6,7 +6,7 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 **产物是单个 exe，拷到任何 Windows 10/11 机器上直接双击即可运行**，不需要安装运行库、不需要带 DLL。
 客户端和服务端都是如此，各自只有一个文件。
 
-当前版本：`v1.0.2`
+当前版本：`v1.0.5`
 
 版本号**只在 `Cargo.toml` 的 `version` 字段维护一份**，另外两处都由它派生：
 
@@ -30,7 +30,10 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 | 环境自适应 | `automation.rs` | 简体 / 繁体 / 英文三种对话框标题与登录按钮文案 |
 | 控件定位 | `automation.rs` | 按几何位置而非控件顺序定位（密码框取最下方 Edit、账户框取密码框上方纵坐标最大的 ComboBox） |
 | 密码错误识别 | `automation.rs` | Qatar 匹配与语言无关的返回码 `ec: -3`；QtPacker 匹配标题 `Message` 且正文含 `Fail to login` 的提示框 |
-| 重置密码 | `net.rs` | `GET /api/user/forgetpwd?uid=工号`，响应体为 `1` 视为成功 |
+| 设置密码 | `net.rs` | `POST /api/user/setpassword`，JSON `{"uid","pwd"}`，**响应体恰好是 `ok`** 才算成功；失败时原样展示服务端文案 |
+| 密码自动重置 | `pwd.rs` + `app.rs` | 7 个密码按 7 天滚动切换，49 天一轮回；提前 6 小时触发，启动后每分钟检查一次 |
+| 密码池存储 | `settings.rs` | 7 个密码用 DPAPI 加密后写 `REG_BINARY pwdPool`，只有当前 Windows 用户能解开 |
+| 密码对话框 | `dlg.rs` | 三点菜单 →「自定义密码」单次设置 /「自动重置密码」7 个密码 + 随机生成；不合规的输入框描红 |
 | 开机自启 | `settings.rs` | 写入 `HKCU\...\CurrentVersion\Run\autoLoginQatarApp` |
 | 配置持久化 | `settings.rs` | `HKCU\Software\Qtech\autoLoginQatarApp` |
 | 系统托盘 | `tray.rs` | 双击恢复主界面，右键菜单含状态展示 / 启停 / 显示 / 退出 |
@@ -42,9 +45,9 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 
 - **没有外发光阴影**。原版用 `QGraphicsDropShadowEffect` 做柔化投影，而逐像素 alpha 的分层窗口无法承载原生输入框子控件，这里就没做投影。
 - **圆角卡片由一个独立的背景层窗口绘制**。窗口区域（`SetWindowRgn`）是 1 位掩码，圆弧只能用整像素台阶逼近，深色壁纸下会露出一圈毛刺；所以把「外观」和「输入」拆成两层：背景层是逐像素 alpha 的分层窗口，抗锯齿地画圆角与描边；主窗口只承载子控件，自身裁成**内缩 2px 的圆角区域**，硬边落在背景层白色卡片内部，同色所以看不见。见 `backdrop.rs`。
-- **弹窗用系统 MessageBox**，不再自绘对话框。
+- **提示框用系统 MessageBox，密码对话框是自绘圆角卡片**（`dlg.rs`，复用背景层那套双窗口结构）。
 - **托盘菜单为自绘菜单项**（白底 / 圆角高亮），但没有做菜单外框的圆角。
-- **标题右侧多了一个版本徽章**。原版标题栏只有标题文字；这里加了 `v1.0.2` 胶囊，
+- **标题右侧多了一个版本徽章**。原版标题栏只有标题文字；这里加了版本胶囊，
   为后续的自动更新留位置（服务端接上后，徽章变黄即代表有新版本）。托盘提示、
   任务栏标题仍与原版一致，不带版本号。
 
@@ -340,6 +343,15 @@ AutoLoginQatarTool.exe --render-preview <输出目录> [缩放倍数]
 会输出 `00-图标.png` 与 `01..06-*.png`（已停止 / 运行中 / 登录中-密码明文 / 悬停停止按钮 / 悬停关闭按钮 / 版本有更新）。
 
 `06-版本有更新.png` 专门用来核对「有新版本」时的黄色徽章 —— 绿色那几张已经覆盖了「已是最新」。
+
+### 直接打开密码对话框
+
+```bash
+AutoLoginQatarTool.exe --open-dialog auto     # 自动重置密码（7 个密码）
+AutoLoginQatarTool.exe --open-dialog custom   # 自定义密码
+```
+
+不写界面交互就能核对对话框的排版，配合 `--render-preview` 一起用。
 
 ### 启动追踪
 

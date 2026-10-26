@@ -112,6 +112,53 @@ pub fn draw_eye(canvas: &Canvas, r: Rect, off: bool, color: u32, stroke: f32) {
     }
 }
 
+/// 标题栏「三个点」图标（1.0.5）
+pub fn draw_more(canvas: &Canvas, r: Rect, color: u32) {
+    let k = r.w as f32 / 24.0;
+    let cy = r.y as f32 + 12.0 * k;
+    for i in 0..3 {
+        let cx = r.x as f32 + (5.0 + i as f32 * 7.0) * k;
+        let rad = (1.7 * k).max(1.0);
+        canvas.fill_ellipse(
+            Rect::new(
+                (cx - rad).round() as i32,
+                (cy - rad).round() as i32,
+                (rad * 2.0).round().max(1.0) as i32,
+                (rad * 2.0).round().max(1.0) as i32,
+            ),
+            rgba_from(color),
+        );
+    }
+}
+
+/// 复制图标：两个错位的圆角方框（1.0.5，取代原来的「重置」文字按钮）
+///
+/// 先画后面那个（右下）的描边，再用按钮底色把前面那个填一遍 ——
+/// 否则两条描边在重叠区交叉，缩小到 15px 就是一团糊。
+pub fn draw_copy(canvas: &Canvas, r: Rect, fg: u32, bg: u32, stroke: f32) {
+    let k = r.w as f32 / 24.0;
+    let at = |x: f32, y: f32, w: f32, h: f32| {
+        Rect::new(
+            (r.x as f32 + x * k).round() as i32,
+            (r.y as f32 + y * k).round() as i32,
+            (w * k).round().max(2.0) as i32,
+            (h * k).round().max(2.0) as i32,
+        )
+    };
+    let radius = (2.6 * k).max(1.0);
+
+    let back = at(8.5, 8.5, 12.5, 12.5);
+    if let Some(p) = Path::round_rect(back, radius) {
+        canvas.stroke_path(&p, rgba_from(fg), stroke);
+    }
+
+    let front = at(3.0, 3.0, 12.5, 12.5);
+    canvas.fill_round_rect(front, radius, rgba_from(bg));
+    if let Some(p) = Path::round_rect(front, radius) {
+        canvas.stroke_path(&p, rgba_from(fg), stroke);
+    }
+}
+
 fn rgba_from(hex: u32) -> u32 {
     rgba(
         ((hex >> 16) & 0xFF) as u8,

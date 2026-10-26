@@ -87,3 +87,45 @@ pub fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
         .to_lowercase()
         .contains(&needle.to_lowercase())
 }
+
+// ---------------------------------------------------------------------------
+// 剪贴板
+// ---------------------------------------------------------------------------
+
+/// 把文本写进剪贴板（1.0.5 的「复制当前密码」）。
+///
+/// 返回值只用于日志：剪贴板被别的进程占着时会失败，没必要弹框打扰用户。
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return false;
+        }
+        let _ = EmptyClipboard();
+
+        let wide = to_wide(text);
+        let bytes = wide.len() * std::mem::size_of::<u16>();
+        let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, bytes) else {
+            let _ = CloseClipboard();
+            return false;
+        };
+        let ptr = GlobalLock(mem) as *mut u16;
+        if ptr.is_null() {
+            let _ = CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        let _ = GlobalUnlock(mem);
+
+        // 13 = CF_UNICODETEXT。所有权在 SetClipboardData 成功后归系统，
+        // 这里不能再 GlobalFree，否则会把系统手里的内存释放掉。
+        let ok = SetClipboardData(13, Some(HANDLE(mem.0))).is_ok();
+        let _ = CloseClipboard();
+        ok
+    }
+}
