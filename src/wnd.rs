@@ -353,8 +353,12 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
             if let Some(app) = app {
                 let mis = &mut *(lparam.0 as *mut MEASUREITEMSTRUCT);
                 // 托盘菜单（2001-2005）与三点菜单（2101-2102）共用这两条消息，
-                // 靠 ID 段区分，别让两边互相覆盖尺寸
-                match mis.CtlID as usize {
+                // 靠 ID 段区分，别让两边互相覆盖尺寸。
+                //
+                // 注意是 **itemID** 不是 CtlID：对菜单项来说 CtlID 永远是 0，
+                // 菜单项自己的 ID 在 itemID 里。用 CtlID 判断会让三点菜单一路走到
+                // 托盘那套绘制里，而托盘只认 2001-2005，结果就是弹出一个空白菜单。
+                match mis.itemID as usize {
                     app::IDM_CUSTOM_PWD | app::IDM_AUTO_PWD => app.measure_more_menu_item(mis),
                     _ => app.tray.measure_item(mis),
                 }
@@ -365,7 +369,7 @@ unsafe extern "system" fn main_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
         WM_DRAWITEM => {
             if let Some(app) = app {
                 let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);
-                match dis.CtlID as usize {
+                match dis.itemID as usize {
                     app::IDM_CUSTOM_PWD | app::IDM_AUTO_PWD => app.draw_more_menu_item(dis),
                     _ => app.tray.draw_item(dis),
                 }

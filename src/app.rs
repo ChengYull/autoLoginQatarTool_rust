@@ -1326,7 +1326,7 @@ impl App {
             }
         }
 
-        let text = match dis.CtlID as usize {
+        let text = match dis.itemID as usize {
             IDM_CUSTOM_PWD => "自定义密码",
             IDM_AUTO_PWD => "自动重置密码",
             _ => "",
@@ -1353,13 +1353,13 @@ impl App {
             crate::dlg::Kind::Custom,
             &self.account,
             &[],
-            false,
             "",
         );
         self.dialog_open = false;
         let Some(out) = out else {
             return;
         };
+        self.adopt_dialog_account(out.account);
         let Some(pwd) = out.passwords.into_iter().next() else {
             return;
         };
@@ -1384,13 +1384,13 @@ impl App {
             crate::dlg::Kind::Auto,
             &self.account,
             &current,
-            self.pool.auto,
             &next_text,
         );
         self.dialog_open = false;
         let Some(out) = out else {
             return;
         };
+        self.adopt_dialog_account(out.account);
 
         for (i, p) in out.passwords.iter().enumerate() {
             if i < crate::pwd::POOL_SIZE {
@@ -1438,6 +1438,24 @@ impl App {
             };
             self.start_set_password(first, ctx);
         }
+    }
+
+    /// 对话框里允许改账户，提交后要同步回主界面和配置
+    fn adopt_dialog_account(&mut self, account: String) {
+        let account = account.trim().to_string();
+        if account.is_empty() || account == self.account {
+            return;
+        }
+        crate::tlog!("对话框改了账户: {:?} -> {:?}", self.account, account);
+        self.account = account;
+        self.syncing = true;
+        let wide = to_wide(&self.account);
+        unsafe {
+            let _ = SetWindowTextW(self.h_account, PCWSTR(wide.as_ptr()));
+        }
+        self.syncing = false;
+        self.save_settings();
+        self.repaint();
     }
 
     /// 起一次后台「设置密码」请求

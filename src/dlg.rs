@@ -13,9 +13,7 @@ use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, EM_SETMARGINS, EM_SETPASSWORDCHAR, ODS_SELECTED,
-};
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, EM_SETMARGINS, EM_SETPASSWORDCHAR, ODS_SELECTED};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -32,8 +30,8 @@ pub const DLG_CLASS: &str = "RustAutoLoginDlg";
 const ID_ACCOUNT: usize = 3100;
 const ID_PWD_BASE: usize = 3110;
 const ID_GEN: usize = 3120;
-const ID_SHOW: usize = 3121;
-const ID_AUTO: usize = 3122;
+/// 每个密码框右侧的小眼睛：ID_EYE_BASE + i
+const ID_EYE_BASE: usize = 3140;
 const ID_CANCEL: usize = 3130;
 const ID_OK: usize = 3131;
 /// 标题栏关闭按钮。单独一个 ID，是为了让它只关窗口、不触发校验。
@@ -52,6 +50,8 @@ pub struct Outcome {
     /// 哪个对话框产生的（调用方一般已经知道，留着便于日志与将来复用）
     #[allow(dead_code)]
     pub kind: Kind,
+    /// 对话框里填的账户（默认预填主界面的账户，允许改）
+    pub account: String,
     /// Custom 只有一个；Auto 是 7 个
     pub passwords: Vec<String>,
     pub auto: bool,
@@ -67,15 +67,17 @@ struct Geo {
     title: Rect,
     close_btn: Rect,
     account_label: Rect,
-    account_value: Rect,
+    /// 账户输入框外框 + 内部 EDIT
+    account_box: Rect,
+    account_edit: Rect,
     pwd_labels: Vec<Rect>,
     pwd_boxes: Vec<Rect>,
     pwd_edits: Vec<Rect>,
+    /// 每个密码框右侧的小眼睛（1 个或 7 个）
+    eyes: Vec<Rect>,
     hint: Rect,
     error: Rect,
     gen_btn: Rect,
-    show_box: Rect,
-    auto_box: Rect,
     next: Rect,
     cancel: Rect,
     ok: Rect,
@@ -85,6 +87,9 @@ const TITLE_H: f32 = 42.0;
 const PAD: f32 = 16.0;
 const ROW_H: f32 = 28.0;
 const GAP: f32 = 8.0;
+/// 输入框右侧给眼睛留的宽度
+const EYE_W: f32 = 26.0;
+const EYE_SIZE: f32 = 16.0;
 
 fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
     let s = |v: f32| (v * scale).round() as i32;
@@ -92,7 +97,8 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
 
     let (w_f, h_f) = match kind {
         Kind::Custom => (320.0, 248.0),
-        Kind::Auto => (360.0, 442.0),
+        // 去掉原来那行「显示密码 / 启用自动重置」勾选框，高度相应收紧
+        Kind::Auto => (360.0, 414.0),
     };
     let (w, h) = (s(w_f), s(h_f));
 
@@ -103,17 +109,23 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
     let inner_w = w - s(PAD) * 2;
     let mut y = s(TITLE_H) + s(8.0);
 
+    // 账户：可编辑输入框，样式和密码框一致，只是预填当前账户
     let account_label = Rect::new(inner_x, y, s(40.0), s(ROW_H));
-    let account_value = Rect::new(inner_x + s(48.0), y, inner_w - s(48.0), s(ROW_H));
+    let account_box = Rect::new(inner_x + s(48.0), y, inner_w - s(48.0), s(ROW_H));
+    let account_edit = Rect::new(
+        account_box.x + s(9.0),
+        account_box.y + (account_box.h - body_h) / 2,
+        account_box.w - s(18.0),
+        body_h + s(4.0),
+    );
     y += s(ROW_H) + s(GAP);
 
     let mut pwd_labels = Vec::new();
     let mut pwd_boxes = Vec::new();
     let mut pwd_edits = Vec::new();
+    let mut eyes = Vec::new();
     let hint;
     let gen_btn;
-    let show_box;
-    let auto_box;
     let next;
     let error;
 
@@ -122,24 +134,29 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
             let label = Rect::new(inner_x, y, inner_w, s(16.0));
             y += s(16.0) + s(4.0);
             let fld = Rect::new(inner_x, y, inner_w, s(ROW_H));
+            let eye = Rect::new(
+                fld.right() - s(6.0) - s(EYE_SIZE),
+                fld.y + (fld.h - s(EYE_SIZE)) / 2,
+                s(EYE_SIZE),
+                s(EYE_SIZE),
+            );
             let edit = Rect::new(
                 fld.x + s(10.0),
                 fld.y + (fld.h - body_h) / 2,
-                fld.w - s(20.0),
+                fld.w - s(10.0) - s(EYE_W),
                 body_h + s(4.0),
             );
             pwd_labels.push(label);
             pwd_boxes.push(fld);
             pwd_edits.push(edit);
+            eyes.push(eye);
             y += s(ROW_H) + s(GAP);
 
-            hint = Rect::new(inner_x, y, inner_w - s(80.0), s(15.0));
-            show_box = Rect::new(inner_x + inner_w - s(76.0), y - s(3.0), s(76.0), s(20.0));
+            hint = Rect::new(inner_x, y, inner_w, s(15.0));
             y += s(15.0) + s(10.0);
             error = Rect::new(inner_x, y, inner_w, s(15.0));
 
             gen_btn = Rect::new(0, 0, 0, 0);
-            auto_box = Rect::new(0, 0, 0, 0);
             next = Rect::new(0, 0, 0, 0);
         }
         Kind::Auto => {
@@ -151,25 +168,27 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
             for _ in 0..POOL_SIZE {
                 pwd_labels.push(Rect::new(inner_x, y, s(14.0), s(26.0)));
                 let fld = Rect::new(inner_x + s(18.0), y, inner_w - s(18.0), s(26.0));
+                let eye = Rect::new(
+                    fld.right() - s(5.0) - s(EYE_SIZE),
+                    fld.y + (fld.h - s(EYE_SIZE)) / 2,
+                    s(EYE_SIZE),
+                    s(EYE_SIZE),
+                );
                 let edit = Rect::new(
                     fld.x + s(9.0),
                     fld.y + (fld.h - body_h) / 2,
-                    fld.w - s(18.0),
+                    fld.w - s(9.0) - s(EYE_W),
                     body_h + s(4.0),
                 );
                 pwd_boxes.push(fld);
                 pwd_edits.push(edit);
+                eyes.push(eye);
                 y += s(26.0) + s(4.0);
             }
-            y += s(4.0);
-
-            show_box = Rect::new(inner_x, y, s(90.0), s(20.0));
-            auto_box = Rect::new(inner_x + s(100.0), y, inner_w - s(100.0), s(20.0));
-            y += s(20.0) + s(6.0);
+            y += s(6.0);
 
             next = Rect::new(inner_x, y, inner_w, s(15.0));
             y += s(15.0) + s(4.0);
-
             error = Rect::new(inner_x, y, inner_w, s(15.0));
         }
     }
@@ -185,15 +204,15 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
         title,
         close_btn,
         account_label,
-        account_value,
+        account_box,
+        account_edit,
         pwd_labels,
         pwd_boxes,
         pwd_edits,
+        eyes,
         hint,
         error,
         gen_btn,
-        show_box,
-        auto_box,
         next,
         cancel,
         ok,
@@ -216,10 +235,12 @@ struct Dlg {
     /// 打开时预填进输入框的密码（编辑已有配置）
     initial: Vec<String>,
     pwd_edits: Vec<HWND>,
+    /// 每个密码框右侧的小眼睛
+    eye_btns: Vec<HWND>,
     /// 每个密码框当前是否「爆红」
     invalid: Vec<bool>,
-    show_pwd: bool,
-    auto_on: bool,
+    /// 每个密码框当前是否明文显示（眼睛的状态）
+    show: [bool; POOL_SIZE],
     next_text: String,
     /// 用户点过「设置 / 保存」之后才显示错误 —— 否则一打开满屏红框
     show_errors: bool,
@@ -310,7 +331,6 @@ pub fn open(
     kind: Kind,
     account: &str,
     passwords: &[String],
-    auto_on: bool,
     next_text: &str,
 ) -> Option<Outcome> {
     let scale = dpi as f32 / 96.0;
@@ -328,9 +348,9 @@ pub fn open(
         account: account.to_string(),
         initial: passwords.to_vec(),
         pwd_edits: Vec::new(),
+        eye_btns: Vec::new(),
         invalid: vec![false; POOL_SIZE],
-        show_pwd: false,
-        auto_on,
+        show: [false; POOL_SIZE],
         next_text: next_text.to_string(),
         show_errors: false,
         hover: 0,
@@ -466,14 +486,19 @@ unsafe extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
             // 按钮和复选框的 BN_CLICKED 都是 0，靠 ID 区分
             if code == 0 {
+                if (ID_EYE_BASE..ID_EYE_BASE + POOL_SIZE).contains(&id) {
+                    let i = id - ID_EYE_BASE;
+                    if let Some(slot) = dlg.show.get_mut(i) {
+                        *slot = !*slot;
+                    }
+                    apply_password_mask(dlg);
+                    // 重画眼睛本身（睁开 / 划掉）
+                    if let Some(&eye) = dlg.eye_btns.get(i) {
+                        let _ = InvalidateRect(Some(eye), None, true);
+                    }
+                    return LRESULT(0);
+                }
                 match id {
-                    ID_SHOW => {
-                        dlg.show_pwd = is_checked(hwnd, ID_SHOW);
-                        apply_password_mask(dlg);
-                    }
-                    ID_AUTO => {
-                        dlg.auto_on = is_checked(hwnd, ID_AUTO);
-                    }
                     ID_GEN => fill_random(dlg),
                     ID_OK => {
                         try_submit(dlg);
@@ -522,29 +547,18 @@ unsafe extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     }
 }
 
-fn is_checked(parent: HWND, id: usize) -> bool {
-    unsafe {
-        let h = GetDlgItem(Some(parent), id as i32).unwrap_or_default();
-        SendMessageW(h, BM_GETCHECK, None, None).0 == 1
-    }
-}
-
 fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
-/// 切换 7 个输入框的掩码字符
+/// 按每行自己的开关刷新掩码字符
 fn apply_password_mask(dlg: &Dlg) {
     unsafe {
-        for &edit in dlg.pwd_edits.iter() {
-            SendMessageW(
-                edit,
-                EM_SETPASSWORDCHAR,
-                Some(WPARAM(if dlg.show_pwd { 0 } else { 0x25CF })),
-                None,
-            );
+        for (i, &edit) in dlg.pwd_edits.iter().enumerate() {
+            let mask = if dlg.show.get(i).copied().unwrap_or(false) { 0 } else { 0x25CF };
+            SendMessageW(edit, EM_SETPASSWORDCHAR, Some(WPARAM(mask)), None);
             let _ = InvalidateRect(Some(edit), None, true);
         }
     }
@@ -556,20 +570,21 @@ fn apply_password_mask(dlg: &Dlg) {
 
 fn create_children(dlg: &mut Dlg) {
     let g = &dlg.geo;
-    let scale = dlg.scale;
 
-    // 账户：只读展示，不给编辑 —— 账户来自主界面，这里改了会和配置不一致
+    // 账户：可编辑输入框，预填当前账户。
+    // 允许改是因为偶尔要帮同事设一次密码，改完这个对话框里的请求就用新账户。
     let acc = create_child(
         dlg,
-        "STATIC",
-        WS_CHILD | WS_VISIBLE,
+        "EDIT",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x0080), // ES_AUTOHSCROLL
         ID_ACCOUNT,
-        g.account_value,
+        g.account_edit,
     );
     let text = to_wide(&dlg.account);
     unsafe {
         let _ = SetWindowTextW(acc, PCWSTR(text.as_ptr()));
         SendMessageW(acc, WM_SETFONT, Some(WPARAM(dlg.fonts.body.0 as usize)), Some(LPARAM(1)));
+        SendMessageW(acc, EM_SETMARGINS, Some(WPARAM(0)), Some(LPARAM(0)));
     }
 
     let n = match dlg.kind {
@@ -591,6 +606,16 @@ fn create_children(dlg: &mut Dlg) {
             SendMessageW(edit, EM_SETMARGINS, Some(WPARAM(0)), Some(LPARAM(0)));
         }
         dlg.pwd_edits.push(edit);
+
+        // 每行一个小眼睛，点一下切换该行明文 / 掩码
+        let eye = create_child(
+            dlg,
+            "BUTTON",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x000B), // BS_OWNERDRAW
+            ID_EYE_BASE + i,
+            g.eyes[i],
+        );
+        dlg.eye_btns.push(eye);
     }
 
     // 预填已有密码（「自动重置密码」再打开时要能看到之前填的 7 个）
@@ -603,37 +628,7 @@ fn create_children(dlg: &mut Dlg) {
         }
     }
 
-    // 显示密码：两个对话框都要（密码有大小写和特殊符号，看不见很容易输错）
-    let show = create_child(
-        dlg,
-        "BUTTON",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x0003), // BS_AUTOCHECKBOX
-        ID_SHOW,
-        g.show_box,
-    );
-    let show_text = to_wide("显示密码");
-    unsafe {
-        let _ = SetWindowTextW(show, PCWSTR(show_text.as_ptr()));
-        SendMessageW(show, WM_SETFONT, Some(WPARAM(dlg.fonts.small.0 as usize)), Some(LPARAM(1)));
-    }
-
     if dlg.kind == Kind::Auto {
-        let auto = create_child(
-            dlg,
-            "BUTTON",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(0x0003),
-            ID_AUTO,
-            g.auto_box,
-        );
-        let auto_text = to_wide("启用自动重置");
-        unsafe {
-            let _ = SetWindowTextW(auto, PCWSTR(auto_text.as_ptr()));
-            SendMessageW(auto, WM_SETFONT, Some(WPARAM(dlg.fonts.small.0 as usize)), Some(LPARAM(1)));
-            if dlg.auto_on {
-                SendMessageW(auto, BM_SETCHECK, Some(WPARAM(1)), None);
-            }
-        }
-
         // 生成按钮
         let gen = create_child(
             dlg,
@@ -679,8 +674,6 @@ fn create_children(dlg: &mut Dlg) {
     unsafe {
         SendMessageW(close, WM_SETFONT, Some(WPARAM(dlg.fonts.body.0 as usize)), Some(LPARAM(1)));
     }
-
-    let _ = scale;
 }
 
 fn create_child(dlg: &Dlg, class: &str, style: WINDOW_STYLE, id: usize, r: Rect) -> HWND {
@@ -764,7 +757,10 @@ fn paint(dlg: &Dlg, hdc: HDC) {
 
     // 账户
     canvas.text("账户", g.account_label, f.label, rgb(theme::LABEL), ALIGN_LEFT);
-    canvas.fill_round_rect(g.account_value, 6.0 * dlg.scale, rgb(theme::INPUT_DISABLED_BG));
+    canvas.fill_round_rect(g.account_box, 6.0 * dlg.scale, rgb(theme::INPUT_BG));
+    if let Some(path) = crate::gfx::Path::round_rect(g.account_box, 6.0 * dlg.scale) {
+        canvas.stroke_path(&path, rgb(theme::INPUT_BORDER), 1.0);
+    }
 
     // 密码标签 + 外框
     for (i, label) in g.pwd_labels.iter().enumerate() {
@@ -847,10 +843,19 @@ fn draw_button(dlg: &Dlg, dis: &DRAWITEMSTRUCT) {
     };
     canvas.fill_rect(r, rgb(theme::CARD_BG));
 
+    // 小眼睛：睁眼 = 明文，划掉 = 掩码
+    if (ID_EYE_BASE..ID_EYE_BASE + POOL_SIZE).contains(&id) {
+        let i = id - ID_EYE_BASE;
+        let on = dlg.show.get(i).copied().unwrap_or(false);
+        crate::icon::draw_eye(&canvas, r, !on, theme::WINBTN_FG, 1.6 * dlg.scale);
+        return;
+    }
+
     let (kind, text) = match id {
         ID_OK => (
             BtnKind::Primary,
-            if dlg.kind == Kind::Custom { "设置" } else { "保存" },
+            // 自动重置页的主按钮就是「保存并启用」，不再是「保存」
+            if dlg.kind == Kind::Custom { "设置" } else { "自动重置" },
         ),
         ID_CANCEL => (BtnKind::Secondary, "取消"),
         ID_GEN => (BtnKind::Ghost, "生成"),
@@ -876,14 +881,47 @@ fn draw_button(dlg: &Dlg, dis: &DRAWITEMSTRUCT) {
 // 结果提交
 // ---------------------------------------------------------------------------
 
+fn text_of(hwnd: HWND) -> String {
+    if hwnd.0.is_null() {
+        return String::new();
+    }
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if len <= 0 {
+        String::new()
+    } else {
+        from_wide(&buf[..len as usize])
+    }
+}
+
 /// 校验并提交。返回 true 表示对话框已关闭。
 fn try_submit(dlg: &mut Dlg) -> bool {
+    // 账户在对话框里可改，提交时以输入框为准
+    let acc_hwnd = unsafe { GetDlgItem(Some(dlg.hwnd), ID_ACCOUNT as i32) }.unwrap_or_default();
+    let account = text_of(acc_hwnd).trim().to_string();
+    if account.is_empty() {
+        unsafe {
+            if !acc_hwnd.0.is_null() {
+                let _ = SetFocus(Some(acc_hwnd));
+            }
+            let _ = MessageBoxW(
+                Some(dlg.hwnd),
+                windows::core::w!("请先填写账户。"),
+                windows::core::w!("账户为空"),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
+        return false;
+    }
+
     match dlg.collect() {
         Ok(passwords) => {
             dlg.outcome = Some(Outcome {
                 kind: dlg.kind,
+                account,
                 passwords,
-                auto: dlg.auto_on,
+                // 自动重置页没有独立开关了：点主按钮就等于「保存并启用」
+                auto: dlg.kind == Kind::Auto,
             });
             unsafe {
                 let _ = DestroyWindow(dlg.hwnd);
