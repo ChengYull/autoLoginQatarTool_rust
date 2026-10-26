@@ -1353,6 +1353,7 @@ impl App {
             crate::dlg::Kind::Custom,
             &self.account,
             &[],
+            false,
             "",
         );
         self.dialog_open = false;
@@ -1384,6 +1385,7 @@ impl App {
             crate::dlg::Kind::Auto,
             &self.account,
             &current,
+            self.pool.auto,
             &next_text,
         );
         self.dialog_open = false;
@@ -1397,46 +1399,67 @@ impl App {
                 self.pool.list[i] = p.clone();
             }
         }
+        let was_auto = self.pool.auto;
         self.pool.auto = out.auto;
-        self.pool.index = 0;
 
-        let now = crate::pwd::now_unix();
-        let first = self.pool.list[0].clone();
-        // 第 1 个就是当前密码时不需要调接口：服务端已经是它了，
-        // 再设一次反而会被「该密码在最近一个月使用过」拒掉。
-        let same_as_current = first == self.password;
-        let apply_now = if same_as_current {
-            true
-        } else {
-            (unsafe {
-                MessageBoxW(
-                    Some(self.hwnd),
-                    windows::core::w!(
-                        "是否立即把第 1 个密码设为当前密码？\n\n选「否」则从现在开始计时，7 天后自动切换到第 2 个。"
-                    ),
-                    windows::core::w!("自动重置密码"),
-                    MB_YESNO | MB_ICONQUESTION,
-                )
-            }) == IDYES
-        };
+        if out.auto && !was_auto {
+            // 首次启用：从此刻开始计时，并问一次要不要立刻把第 1 个设上去。
+            // 已经是启用状态时再改密码列表，计时不能重来 —— 否则每改一次就白送 7 天。
+            self.pool.index = 0;
+            let now = crate::pwd::now_unix();
 
-        // 不管应不应用，计时都从此刻开始：第 1 个就是「当前密码」的语义
-        if same_as_current {
-            self.pool.mark_current_in_use(now);
-        } else {
-            self.pool.last_reset = now;
-            self.pool.used[0] = now;
-        }
-        self.save_settings();
-        self.repaint();
+            // 停用期间密码早就过期了（服务端 7 天强制），这时重新启用不能只是
+            // 「从现在开始计时」—— 那等于再等 7 天，用户这段时间根本登不上。
+            // 先落盘，再让定时器那条路径立刻补一次重置。
+            let stale = self.pool.last_reset > 0
+                && now - self.pool.last_reset >= crate::pwd::PERIOD_SECS;
+            if stale {
+                self.save_settings();
+                self.repaint();
+                self.on_daily_tick();
+                return;
+            }
 
-        if apply_now && !same_as_current {
-            let ctx = PwdCtx {
-                job: PwdJob::Auto { index: 0 },
-                pwd: first.clone(),
-                remaining: Vec::new(),
+            let first = self.pool.list[0].clone();
+            // 第 1 个就是当前密码时不需要调接口：服务端已经是它了，
+            // 再设一次反而会被「该密码在最近一个月使用过」拒掉。
+            let same_as_current = first == self.password;
+            let apply_now = if same_as_current {
+                true
+            } else {
+                (unsafe {
+                    MessageBoxW(
+                        Some(self.hwnd),
+                        windows::core::w!(
+                            "是否立即把第 1 个密码设为当前密码？\n\n选「否」则从现在开始计时，7 天后自动切换到第 2 个。"
+                        ),
+                        windows::core::w!("自动重置密码"),
+                        MB_YESNO | MB_ICONQUESTION,
+                    )
+                }) == IDYES
             };
-            self.start_set_password(first, ctx);
+
+            if same_as_current {
+                self.pool.mark_current_in_use(now);
+            } else {
+                self.pool.last_reset = now;
+                self.pool.used[0] = now;
+            }
+            self.save_settings();
+            self.repaint();
+
+            if apply_now && !same_as_current {
+                let ctx = PwdCtx {
+                    job: PwdJob::Auto { index: 0 },
+                    pwd: first.clone(),
+                    remaining: Vec::new(),
+                };
+                self.start_set_password(first, ctx);
+            }
+        } else {
+            // 停用，或者本来就是启用状态只是改了密码列表：只落盘，不动计时
+            self.save_settings();
+            self.repaint();
         }
     }
 

@@ -96,7 +96,7 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
     let body_h = body_line_h.max(1);
 
     let (w_f, h_f) = match kind {
-        Kind::Custom => (320.0, 248.0),
+        Kind::Custom => (320.0, 228.0),
         // 去掉原来那行「显示密码 / 启用自动重置」勾选框，高度相应收紧
         Kind::Auto => (360.0, 414.0),
     };
@@ -131,9 +131,9 @@ fn build_geo(kind: Kind, scale: f32, body_line_h: i32) -> Geo {
 
     match kind {
         Kind::Custom => {
-            let label = Rect::new(inner_x, y, inner_w, s(16.0));
-            y += s(16.0) + s(4.0);
-            let fld = Rect::new(inner_x, y, inner_w, s(ROW_H));
+            // 标签和输入框放同一行，跟上面的账户行左右对齐
+            let label = Rect::new(inner_x, y, s(48.0), s(ROW_H));
+            let fld = Rect::new(inner_x + s(48.0), y, inner_w - s(48.0), s(ROW_H));
             let eye = Rect::new(
                 fld.right() - s(6.0) - s(EYE_SIZE),
                 fld.y + (fld.h - s(EYE_SIZE)) / 2,
@@ -241,6 +241,10 @@ struct Dlg {
     invalid: Vec<bool>,
     /// 每个密码框当前是否明文显示（眼睛的状态）
     show: [bool; POOL_SIZE],
+    /// 自动重置当前是否已开启（对话框内的即时状态，关闭时随 Outcome 交回）
+    auto_enabled: bool,
+    /// 用户动过「自动重置 / 停用」——决定关闭时是提交还是放弃
+    touched: bool,
     next_text: String,
     /// 用户点过「设置 / 保存」之后才显示错误 —— 否则一打开满屏红框
     show_errors: bool,
@@ -331,6 +335,7 @@ pub fn open(
     kind: Kind,
     account: &str,
     passwords: &[String],
+    auto_on: bool,
     next_text: &str,
 ) -> Option<Outcome> {
     let scale = dpi as f32 / 96.0;
@@ -351,6 +356,8 @@ pub fn open(
         eye_btns: Vec::new(),
         invalid: vec![false; POOL_SIZE],
         show: [false; POOL_SIZE],
+        auto_enabled: auto_on,
+        touched: false,
         next_text: next_text.to_string(),
         show_errors: false,
         hover: 0,
@@ -500,12 +507,11 @@ unsafe extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 }
                 match id {
                     ID_GEN => fill_random(dlg),
-                    ID_OK => {
-                        try_submit(dlg);
-                    }
-                    ID_CANCEL | ID_CLOSE_BTN => {
-                        let _ = DestroyWindow(hwnd);
-                    }
+                    ID_OK => on_primary(dlg),
+                    ID_CANCEL => on_secondary(dlg),
+                    // 右上角 ×：走和「取消」一样的提交判断，
+                    // 免得点过「自动重置」之后直接关窗口把状态丢了
+                    ID_CLOSE_BTN => close_dialog(dlg),
                     _ => {}
                 }
             }
@@ -551,6 +557,21 @@ fn invalidate(hwnd: HWND) {
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
+}
+
+/// 按钮是独立的子窗口，父窗口重绘不会带上它 ——
+/// 「自动重置 / 已开启」「取消 / 停用」这两处文字切换必须单独让按钮重画。
+fn invalidate_button(dlg: &Dlg, id: usize) {
+    unsafe {
+        if let Ok(h) = GetDlgItem(Some(dlg.hwnd), id as i32) {
+            let _ = InvalidateRect(Some(h), None, true);
+        }
+    }
+}
+
+fn invalidate_actions(dlg: &Dlg) {
+    invalidate_button(dlg, ID_OK);
+    invalidate_button(dlg, ID_CANCEL);
 }
 
 /// 按每行自己的开关刷新掩码字符
@@ -851,15 +872,28 @@ fn draw_button(dlg: &Dlg, dis: &DRAWITEMSTRUCT) {
         return;
     }
 
-    let (kind, text) = match id {
-        ID_OK => (
-            BtnKind::Primary,
-            // 自动重置页的主按钮就是「保存并启用」，不再是「保存」
-            if dlg.kind == Kind::Custom { "设置" } else { "自动重置" },
-        ),
-        ID_CANCEL => (BtnKind::Secondary, "取消"),
-        ID_GEN => (BtnKind::Ghost, "生成"),
-        ID_CLOSE_BTN => (BtnKind::WinClose, "✕"),
+    // 自动重置页的两个按钮是状态相关的：
+    //   未开启 → 取消 / 自动重置
+    //   已开启 → 停用 / 已开启（禁用态，表示当前就在这个状态）
+    let (kind, text, disabled) = match id {
+        ID_OK => {
+            if dlg.kind == Kind::Auto && dlg.auto_enabled {
+                (BtnKind::Primary, "已开启", true)
+            } else if dlg.kind == Kind::Auto {
+                (BtnKind::Primary, "自动重置", false)
+            } else {
+                (BtnKind::Primary, "设置", false)
+            }
+        }
+        ID_CANCEL => {
+            if dlg.kind == Kind::Auto && dlg.auto_enabled {
+                (BtnKind::Secondary, "停用", false)
+            } else {
+                (BtnKind::Secondary, "取消", false)
+            }
+        }
+        ID_GEN => (BtnKind::Ghost, "生成", false),
+        ID_CLOSE_BTN => (BtnKind::WinClose, "✕", false),
         _ => return,
     };
 
@@ -873,7 +907,7 @@ fn draw_button(dlg: &Dlg, dis: &DRAWITEMSTRUCT) {
         dlg.scale,
         hovered,
         selected,
-        false,
+        disabled,
     );
 }
 
@@ -895,14 +929,18 @@ fn text_of(hwnd: HWND) -> String {
 }
 
 /// 校验并提交。返回 true 表示对话框已关闭。
-fn try_submit(dlg: &mut Dlg) -> bool {
-    // 账户在对话框里可改，提交时以输入框为准
-    let acc_hwnd = unsafe { GetDlgItem(Some(dlg.hwnd), ID_ACCOUNT as i32) }.unwrap_or_default();
-    let account = text_of(acc_hwnd).trim().to_string();
-    if account.is_empty() {
+/// 账户输入框句柄
+fn account_hwnd(dlg: &Dlg) -> HWND {
+    unsafe { GetDlgItem(Some(dlg.hwnd), ID_ACCOUNT as i32) }.unwrap_or_default()
+}
+
+/// 校验账户 + 所有密码。失败时标红第一个出问题的框并聚焦，返回 false。
+fn validate_all(dlg: &mut Dlg) -> bool {
+    let acc = account_hwnd(dlg);
+    if text_of(acc).trim().is_empty() {
         unsafe {
-            if !acc_hwnd.0.is_null() {
-                let _ = SetFocus(Some(acc_hwnd));
+            if !acc.0.is_null() {
+                let _ = SetFocus(Some(acc));
             }
             let _ = MessageBoxW(
                 Some(dlg.hwnd),
@@ -915,19 +953,7 @@ fn try_submit(dlg: &mut Dlg) -> bool {
     }
 
     match dlg.collect() {
-        Ok(passwords) => {
-            dlg.outcome = Some(Outcome {
-                kind: dlg.kind,
-                account,
-                passwords,
-                // 自动重置页没有独立开关了：点主按钮就等于「保存并启用」
-                auto: dlg.kind == Kind::Auto,
-            });
-            unsafe {
-                let _ = DestroyWindow(dlg.hwnd);
-            }
-            true
-        }
+        Ok(_) => true,
         Err((idx, _msg)) => {
             dlg.show_errors = true;
             for v in dlg.invalid.iter_mut() {
@@ -944,6 +970,83 @@ fn try_submit(dlg: &mut Dlg) -> bool {
             }
             false
         }
+    }
+}
+
+fn read_all_pwds(dlg: &Dlg) -> Vec<String> {
+    let n = match dlg.kind {
+        Kind::Custom => 1,
+        Kind::Auto => POOL_SIZE,
+    };
+    (0..n).map(|i| dlg.read_pwd(i)).collect()
+}
+
+/// 主按钮：自定义页是「设置」（校验后关闭），自动重置页是「自动重置」（校验后开启，不关闭）
+fn on_primary(dlg: &mut Dlg) {
+    match dlg.kind {
+        Kind::Custom => {
+            if !validate_all(dlg) {
+                return;
+            }
+            let account = text_of(account_hwnd(dlg)).trim().to_string();
+            dlg.outcome = Some(Outcome {
+                kind: dlg.kind,
+                account,
+                passwords: read_all_pwds(dlg),
+                auto: false,
+            });
+            unsafe {
+                let _ = DestroyWindow(dlg.hwnd);
+            }
+        }
+        Kind::Auto => {
+            // 已开启时按钮是禁用态，点不动
+            if dlg.auto_enabled {
+                return;
+            }
+            if validate_all(dlg) {
+                dlg.auto_enabled = true;
+                dlg.touched = true;
+                dlg.show_errors = false;
+                invalidate_actions(dlg);
+            }
+        }
+    }
+}
+
+/// 次按钮：自动重置已开启时它是「停用」，否则是「取消」
+fn on_secondary(dlg: &mut Dlg) {
+    if dlg.kind == Kind::Auto && dlg.auto_enabled {
+        // 停用不校验密码 —— 用户可能正在改列表，先让他把开关关掉
+        dlg.auto_enabled = false;
+        dlg.touched = true;
+        invalidate_actions(dlg);
+        return;
+    }
+    close_dialog(dlg);
+}
+
+/// 关窗口：动过开关就提交结果，没动过就当作放弃
+fn close_dialog(dlg: &mut Dlg) {
+    // 动过按钮、或者打开时本来就是启用状态（改了密码要能存下来），才提交
+    if dlg.kind == Kind::Auto && (dlg.touched || dlg.auto_enabled) {
+        // 启用状态下必须保证密码合规，否则下次自动重置会被服务端拒
+        if dlg.auto_enabled && !validate_all(dlg) {
+            return;
+        }
+        let account = text_of(account_hwnd(dlg)).trim().to_string();
+        if account.is_empty() {
+            return;
+        }
+        dlg.outcome = Some(Outcome {
+            kind: dlg.kind,
+            account,
+            passwords: read_all_pwds(dlg),
+            auto: dlg.auto_enabled,
+        });
+    }
+    unsafe {
+        let _ = DestroyWindow(dlg.hwnd);
     }
 }
 
