@@ -97,9 +97,12 @@ fn main() {
 
     // 调试入口：直接打开密码对话框，方便在没有鼠标的环境下核对视觉
     if let Some(idx) = args.iter().position(|a| a == "--open-dialog") {
-        let kind = match args.get(idx + 1).map(|s| s.as_str()) {
-            Some("auto") => dlg::Kind::Auto,
-            _ => dlg::Kind::Custom,
+        // auto-on：直接以「已开启」状态打开，用来核对锁定态的视觉。
+        // 不能靠点「自动重置」进这个状态 —— 那会真的调生产重置接口。
+        let (kind, auto_on) = match args.get(idx + 1).map(|s| s.as_str()) {
+            Some("auto") => (dlg::Kind::Auto, false),
+            Some("auto-on") => (dlg::Kind::Auto, true),
+            _ => (dlg::Kind::Custom, false),
         };
         let sample: Vec<String> = (0..pwd::POOL_SIZE)
             .map(|i| format!("TestPass{}a.", i))
@@ -112,7 +115,7 @@ fn main() {
             // 调试用的假工号，别用真实工号 —— 仓库是公开的
             "10000001",
             &sample,
-            false,
+            auto_on,
             "下次重置：6 天后",
         );
     }

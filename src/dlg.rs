@@ -539,10 +539,12 @@ unsafe extern "system" fn dlg_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     theme::INPUT_DISABLED_TEXT
                 })),
             );
-            if msg == WM_CTLCOLORSTATIC {
-                return LRESULT(GetStockObject(NULL_BRUSH).0 as isize);
-            }
-            // 用系统的白色 stock brush：每次都 CreateSolidBrush 会一帧泄漏一个 GDI 对象
+            // 两个分支都必须回实心画刷（输入框底色 = 白卡，所以用白色 stock brush）。
+            // 之前 STATIC 分支回的是 NULL_BRUSH，等于「不擦背景」，于是：
+            // 自动重置已开启时输入框被禁用 → 走 STATIC 分支 → 点小眼睛切明文，
+            // EDIT 只把新文字画上去、旧掩码黑点不擦，明文就和黑点叠在一起。
+            // 未开启时走 EDIT 分支有白色画刷擦底，所以只有「开启状态」才复现。
+            // 注：每次都 CreateSolidBrush 会一帧泄漏一个 GDI 对象，只能用 stock brush。
             LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
         }
 
