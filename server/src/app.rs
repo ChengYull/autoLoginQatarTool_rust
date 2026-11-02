@@ -112,9 +112,11 @@ impl App {
         let fonts = Fonts::new(dpi);
         let layout = build_layout(&fonts, dpi);
 
-        let config = Config::load(&data_dir);
+        // load_or_init：缺发布令牌时生成一个并落盘。远程发布接口要用它，
+        // 空令牌会让接口变成"谁都能发"，所以不能等用户手动配。
+        let config = Config::load_or_init(&data_dir);
         let repo = Repo::load(&data_dir).unwrap_or_default();
-        let shared = Shared::new(data_dir.clone(), repo.clone());
+        let shared = Shared::new(data_dir.clone(), repo.clone(), config.publish_token.clone());
 
         Box::new(App {
             hwnd,
@@ -589,22 +591,17 @@ impl App {
             return;
         };
 
-        match store::publish(&self.data_dir, &file, &params.notes, params.force) {
+        let data_dir = self.data_dir.clone();
+        let mut promoted = false;
+        let result = self.mutate_repo(|repo| {
+            let release = store::publish(&data_dir, &file, &params.notes, params.force)?;
+            // 比当前最新版还新就自动顶上，否则只入库（避免误把旧版本设为对外版本）
+            promoted = repo.apply_publish(release.clone());
+            Ok(release)
+        });
+
+        match result {
             Ok(release) => {
-                let is_newer = self
-                    .repo
-                    .latest_release()
-                    .map(|cur| store::compare_version(&release.version, &cur.version).is_gt())
-                    .unwrap_or(true);
-                self.repo.add(release.clone());
-                // 比当前最新版还新就自动顶上，否则只入库（避免误把旧版本设为对外版本）
-                if is_newer || self.repo.latest.is_empty() {
-                    self.repo.latest = release.version.clone();
-                }
-                if let Err(err) = self.repo.save(&self.data_dir) {
-                    self.error_box("保存失败", &err);
-                }
-                self.sync_shared_repo();
                 self.selected = Some(0);
                 self.scroll = 0;
                 self.info_box(
@@ -613,7 +610,11 @@ impl App {
                         "版本 v{}\n大小 {}\n{}",
                         release.version,
                         store::human_size(release.size),
-                        if is_newer { "已设为对外最新版本" } else { "已入库（比当前最新版旧，未改动对外版本）" }
+                        if promoted {
+                            "已设为对外最新版本"
+                        } else {
+                            "已入库（比当前最新版旧，未改动对外版本）"
+                        }
                     ),
                 );
             }
@@ -634,12 +635,18 @@ impl App {
             return;
         }
         let previous = self.repo.latest.clone();
-        self.repo.latest = version.clone();
-        if let Err(err) = self.repo.save(&self.data_dir) {
+        let target = version.clone();
+        let result = self.mutate_repo(|repo| {
+            if repo.find(&target).is_none() {
+                return Err(format!("仓库里没有版本 {target}"));
+            }
+            repo.latest = target.clone();
+            Ok(())
+        });
+        if let Err(err) = result {
             self.error_box("保存失败", &err);
             return;
         }
-        self.sync_shared_repo();
         self.info_box(
             "已切换对外版本",
             &format!("客户端现在会收到 v{version}\n（原来指向 {}）", if previous.is_empty() { "无" } else { &previous }),
@@ -670,12 +677,9 @@ impl App {
             return;
         }
 
-        match self.repo.remove(&self.data_dir, &version) {
+        let data_dir = self.data_dir.clone();
+        match self.mutate_repo(|repo| repo.remove(&data_dir, &version)) {
             Ok(()) => {
-                if let Err(err) = self.repo.save(&self.data_dir) {
-                    self.error_box("保存失败", &err);
-                }
-                self.sync_shared_repo();
                 self.selected = None;
                 self.scroll = 0;
             }
@@ -685,10 +689,33 @@ impl App {
         self.repaint();
     }
 
-    /// 把仓库的改动同步给 HTTP 服务线程（否则接口还在返回老版本）
-    fn sync_shared_repo(&self) {
-        if let Ok(mut repo) = self.shared.repo.lock() {
-            *repo = self.repo.clone();
+    /// 改动仓库的唯一入口：持锁 → 改 → 落盘 → 回填界面自己的副本。
+    ///
+    /// 为什么非要绕这一道：远程发布（`POST /api/publish`）跑在 HTTP 线程上，
+    /// 它同样会改仓库。以前只有界面线程写，改完 `sync_shared_repo` 推一下就行；
+    /// 现在两个写入方各持一份完整仓库，不共用同一把锁就会互相覆盖 ——
+    /// 典型后果是「远程刚发布完，界面这边一保存，新版本从 releases.json 里消失」。
+    ///
+    /// 落盘也在锁内做，是因为 HTTP 线程的发布同样要「改 + 落盘」原子完成。
+    fn mutate_repo<T>(&mut self, f: impl FnOnce(&mut Repo) -> Result<T, String>) -> Result<T, String> {
+        let mut guard = self
+            .shared
+            .repo
+            .lock()
+            .map_err(|_| "仓库锁不可用".to_string())?;
+
+        let out = f(&mut guard);
+        // 不管成功失败都回填：失败时内存和磁盘都还是旧的，两边保持一致
+        match out {
+            Ok(value) => {
+                let saved = guard.save(&self.data_dir);
+                self.repo = guard.clone();
+                saved.map(|()| value)
+            }
+            Err(err) => {
+                self.repo = guard.clone();
+                Err(err)
+            }
         }
     }
 
@@ -721,23 +748,39 @@ impl App {
         self.last_hits = hits;
         self.last_logs = logs;
 
-        // HTTP 线程只改内存里的下载计数，落盘由这里负责（见 http.rs 里的说明）。
-        // 长度不同说明界面这边刚改过仓库、还没同步过去，别拿旧的回读覆盖它。
+        // HTTP 线程只改内存（下载计数），落盘由这里负责（见 http.rs 里的说明）。
+        //
+        // 以前这里靠「长度不同 = 界面刚改过、还没同步」来跳过回读。现在 HTTP 线程
+        // 自己也会发布版本（长度同样会变），那条判断反过来了：**长度或对外版本不一致
+        // 就说明是外部改的，应该采纳共享仓库**。界面侧的改动全在同一个线程里一次做完，
+        // 不存在"改到一半被读到"的窗口。
         if let Ok(repo) = self.shared.repo.lock() {
-            if repo.releases.len() == self.repo.releases.len() {
-                let counts_changed = repo
-                    .releases
-                    .iter()
-                    .zip(self.repo.releases.iter())
-                    .any(|(live, mine)| live.downloads != mine.downloads);
+            let external = repo.releases.len() != self.repo.releases.len()
+                || repo.latest != self.repo.latest;
+            let counts_changed = repo
+                .releases
+                .iter()
+                .zip(self.repo.releases.iter())
+                .any(|(live, mine)| live.downloads != mine.downloads);
+
+            if external || counts_changed {
                 self.repo = repo.clone();
-                if counts_changed {
+                // 外部改动（远程发布 / 设最新 / 删除）HTTP 那边已经落过盘，
+                // 这里只在"仅仅是下载计数变了"的时候补写一次
+                if !external && counts_changed {
                     if let Err(err) = self.repo.save(&self.data_dir) {
                         crate::tlog!("保存下载计数失败：{err}");
                     }
                 }
             }
         }
+        // 远程可能删掉了当前选中的版本，选中项要跟着失效，否则下面的按钮会指向不存在的行
+        if let Some(idx) = self.selected {
+            if idx >= self.repo.releases.len() {
+                self.selected = None;
+            }
+        }
+        self.update_enabled();
         self.repaint();
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "auto-login-qatar-server"
-version = "0.1.0"
+version = "1.0.6"
 edition = "2021"
 description = "AutoLoginQatarTool 更新服务端：版本发布与分发，带原生管理界面"
 build = "build.rs"

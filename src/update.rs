@@ -20,6 +20,17 @@ pub const CHECK_INTERVAL_MS: u32 = 6 * 60 * 60 * 1000;
 /// 启动后多久做第一次检查：等界面先出来，别跟初始化抢时间
 pub const FIRST_CHECK_DELAY_MS: u32 = 3000;
 
+/// 一个历史版本的说明（服务端 `/api/version` 里 `releases` 数组的元素）
+#[derive(Debug, Clone)]
+pub struct ReleaseInfo {
+    pub version: String,
+    pub notes: String,
+    pub published_at: String,
+    pub force: bool,
+    /// 是否是当前对外版本（服务端 `latest` 指向的那个）
+    pub is_latest: bool,
+}
+
 /// 一次检查的结果
 #[derive(Debug, Clone)]
 pub struct UpdateOutcome {
@@ -30,6 +41,9 @@ pub struct UpdateOutcome {
     pub notes: String,
     /// 服务端给的产物字节数，用于下载后校验；0 表示服务端没给
     pub size: u64,
+    /// 全部历史版本，**服务端已经按「最新版在最前、其余从新到旧」排好序**。
+    /// 老服务端不返回这个字段时为空，展示时退回只用 `latest` + `notes`。
+    pub releases: Vec<ReleaseInfo>,
 }
 
 impl UpdateOutcome {
@@ -40,9 +54,63 @@ impl UpdateOutcome {
             force: false,
             notes: String::new(),
             size: 0,
+            releases: Vec::new(),
         }
     }
+
+    /// 拼出「更新说明」对话框要显示的正文：所有历史版本倒序，最新版在最上。
+    ///
+    /// 服务端没给 `releases`（老版本服务端）时，用 `latest` + `notes` 兜一条，
+    /// 保证界面永远有内容可显示，不会弹出一个空框。
+    pub fn history_text(&self) -> String {
+        let mut list: Vec<ReleaseInfo> = self.releases.clone();
+        if list.is_empty() {
+            if self.latest.is_empty() {
+                return String::new();
+            }
+            list.push(ReleaseInfo {
+                version: self.latest.clone(),
+                notes: self.notes.clone(),
+                published_at: String::new(),
+                force: self.force,
+                is_latest: true,
+            });
+        }
+
+        let mut out = String::new();
+        for (i, r) in list.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\r\n\r\n");
+            }
+            // 标题行：版本号 + 发布时间 + 标记
+            out.push_str(&format!("v{}", r.version));
+            if !r.published_at.is_empty() {
+                out.push_str(&format!("    {}", r.published_at));
+            }
+            if r.is_latest {
+                out.push_str("    [最新]");
+            }
+            if r.force {
+                out.push_str("    [强制]");
+            }
+            out.push_str("\r\n");
+
+            // 说明正文：多行时缩进两格，和标题行区分开
+            let notes = r.notes.trim();
+            if notes.is_empty() {
+                out.push_str("  （这个版本没有填写更新说明）\r\n");
+            } else {
+                for line in notes.replace("\r\n", "\n").split('\n') {
+                    out.push_str("  ");
+                    out.push_str(line.trim_end());
+                    out.push_str("\r\n");
+                }
+            }
+        }
+        out
+    }
 }
+
 
 /// 服务端地址，允许用环境变量覆盖（自测与灰度用）
 pub fn endpoint() -> (String, u16) {
@@ -82,8 +150,109 @@ pub fn check() -> UpdateOutcome {
         size: json_field(&body, "size")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0),
+        releases: parse_releases(&body),
     }
 }
+
+/// 解析 `"releases":[{...},{...}]`。
+///
+/// 顺序照抄服务端 —— 它已经把当前对外版本排在第一，客户端不再自己排，
+/// 免得两边规则不一致（比如回滚之后「版本号最大的」并不是该升级到的那个）。
+fn parse_releases(body: &str) -> Vec<ReleaseInfo> {
+    array_objects(body, "releases")
+        .iter()
+        .filter_map(|obj| {
+            let version = json_field(obj, "version").unwrap_or_default();
+            if version.is_empty() {
+                return None;
+            }
+            Some(ReleaseInfo {
+                version,
+                notes: json_field(obj, "notes").unwrap_or_default(),
+                published_at: json_field(obj, "published_at").unwrap_or_default(),
+                force: json_field(obj, "force").map(|v| v == "true").unwrap_or(false),
+                is_latest: json_field(obj, "latest").map(|v| v == "true").unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// 从扁平 JSON 里取出 `"key": [...]` 这个数组里的每个 `{...}` 对象（原文）。
+///
+/// 必须做字符串感知的扫描：更新说明里完全可能出现 `]`、`}`、引号，直接按字符
+/// 找括号会在说明文字中间断开，把一条说明拆成两条。
+fn array_objects(body: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let bytes = body.as_bytes();
+
+    // 先定位到数组的 '['：要求 key 前面是 `{` 或 `,`（和 json_field 同样的规则），
+    // 否则会匹配到某条说明正文里出现的同名字样。
+    let mut from = 0usize;
+    let start = loop {
+        let Some(pos) = body[from..].find(&needle) else {
+            return Vec::new();
+        };
+        let at = from + pos;
+        let before = body[..at].trim_end().bytes().last();
+        if matches!(before, None | Some(b'{') | Some(b',')) {
+            let mut i = at + needle.len();
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b':' {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'[' {
+                break i + 1;
+            }
+        }
+        from = at + needle.len();
+    };
+
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut obj_start: Option<usize> = None;
+
+    for (offset, ch) in body[start..].char_indices() {
+        let idx = start + offset;
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => {
+                if depth == 0 {
+                    obj_start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = obj_start.take() {
+                        out.push(body[s..=idx].to_string());
+                    }
+                }
+            }
+            ']' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 
 // ---------------------------------------------------------------------------
 // 下载与安装
@@ -315,5 +484,72 @@ mod tests {
         let body = r#"{"latest":"1.0.2","notes":"字段 latest 现在有值了"}"#;
         assert_eq!(json_field(body, "latest").as_deref(), Some("1.0.2"));
         assert_eq!(json_field(body, "notes").as_deref(), Some("字段 latest 现在有值了"));
+    }
+
+    /// 历史版本列表要按服务端给的顺序解析出来（服务端已排好：最新版在最前），
+    /// 并且说明里的 `[` `]` `{` `}` 引号不能打断解析。
+    #[test]
+    fn parses_release_history_in_server_order() {
+        let body = r#"{"update":true,"latest":"1.0.6","notes":"顶部","releases":[
+            {"version":"1.0.6","notes":"修了 [括号] {花括号} 和 \"引号\"","published_at":"2026-11-02 09:00","size":633344,"latest":true},
+            {"version":"1.0.5","notes":"新增 7 个密码\n第二行","published_at":"2026-10-26 10:37","size":633344,"latest":false,"force":true}
+        ]}"#;
+        let list = parse_releases(body);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].version, "1.0.6");
+        assert!(list[0].is_latest);
+        assert_eq!(list[0].notes, "修了 [括号] {花括号} 和 \"引号\"");
+        assert_eq!(list[1].version, "1.0.5");
+        assert!(!list[1].is_latest);
+        assert!(list[1].force);
+        assert_eq!(list[1].notes, "新增 7 个密码\n第二行");
+    }
+
+    /// 老服务端不返回 releases 字段时，不能报错也不能凭空造数据
+    #[test]
+    fn missing_releases_field_yields_empty_list() {
+        let body = r#"{"update":false,"latest":"1.0.1","notes":"x"}"#;
+        assert!(parse_releases(body).is_empty());
+    }
+
+    /// 没有历史列表时，对话框正文要退回「最新版 + 说明」，别弹空框
+    #[test]
+    fn history_text_falls_back_to_latest_notes() {
+        let mut outcome = UpdateOutcome::unknown();
+        outcome.latest = "1.0.6".into();
+        outcome.notes = "修了叠字".into();
+        let text = outcome.history_text();
+        assert!(text.contains("v1.0.6"));
+        assert!(text.contains("修了叠字"));
+        assert!(text.contains("[最新]"));
+    }
+
+    /// 历史列表存在时，正文顺序必须和服务端一致（最新在最上）
+    #[test]
+    fn history_text_keeps_latest_on_top() {
+        let mut outcome = UpdateOutcome::unknown();
+        outcome.latest = "1.0.6".into();
+        outcome.releases = vec![
+            ReleaseInfo {
+                version: "1.0.6".into(),
+                notes: "新的".into(),
+                published_at: "2026-11-02 09:00".into(),
+                force: false,
+                is_latest: true,
+            },
+            ReleaseInfo {
+                version: "1.0.5".into(),
+                notes: "旧的".into(),
+                published_at: "2026-10-26 10:37".into(),
+                force: false,
+                is_latest: false,
+            },
+        ];
+        let text = outcome.history_text();
+        let new_at = text.find("v1.0.6").unwrap();
+        let old_at = text.find("v1.0.5").unwrap();
+        assert!(new_at < old_at, "最新版必须排在最前面");
+        // EDIT 控件换行要 CRLF
+        assert!(text.contains("\r\n"));
     }
 }

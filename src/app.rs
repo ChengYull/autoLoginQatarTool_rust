@@ -729,16 +729,20 @@ impl App {
             return;
         };
 
-        let notes = if info.notes.trim().is_empty() {
-            "（服务端没有提供更新说明）".to_string()
-        } else {
-            info.notes.trim().to_string()
-        };
-        let text = format!(
-            "发现新版本 v{}\n\n{}\n\n更新完成后程序会自动重启，账户密码与开机自启设置保持不变。\n\n是否现在更新？",
-            info.latest, notes
-        );
-        if !self.confirm_box("发现新版本", &text) {
+        // 弹自绘对话框而不是 MessageBox：要展示**全部历史版本**的说明，
+        // 版本一多 MessageBox 就没法滚动、会被屏幕切掉。
+        // 顺序由服务端给（最新版在最上），这里只负责渲染。
+        let body = info.history_text();
+        let dpi = window_dpi(self.hwnd);
+        if !crate::upd_dlg::open(
+            self.hwnd,
+            self.hinst,
+            dpi,
+            version::APP_VERSION,
+            &info.latest,
+            &body,
+        ) {
+            crate::tlog!("用户取消了更新 v{}", info.latest);
             return;
         }
 
@@ -1891,19 +1895,6 @@ impl App {
                 PCWSTR(c.as_ptr()),
                 MB_OK | MB_ICONINFORMATION,
             );
-        }
-    }
-
-    /// 是 / 否确认框
-    pub fn confirm_box(&self, caption: &str, text: &str) -> bool {
-        let (c, t) = (to_wide(caption), to_wide(text));
-        unsafe {
-            MessageBoxW(
-                Some(self.hwnd),
-                PCWSTR(t.as_ptr()),
-                PCWSTR(c.as_ptr()),
-                MB_YESNO | MB_ICONQUESTION,
-            ) == IDYES
         }
     }
 

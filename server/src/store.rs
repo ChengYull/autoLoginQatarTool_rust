@@ -106,9 +106,42 @@ impl Repo {
         list
     }
 
+    /// 对外展示的顺序：**当前对外版本永远排第一**，其余按版本号从新到旧。
+    ///
+    /// 为什么不单纯按版本号排：`latest` 是显式设置的，出问题时可以把对外版本
+    /// 回滚到旧版。回滚之后「版本号最大的那个」并不是用户该升级到的版本，
+    /// 把它摆在第一位会让人误以为那才是最新版。
+    pub fn display_order(&self) -> Vec<&Release> {
+        let mut list = self.sorted();
+        if let Some(pos) = list.iter().position(|r| r.version == self.latest) {
+            let item = list.remove(pos);
+            list.insert(0, item);
+        }
+        list
+    }
+
     pub fn add(&mut self, release: Release) {
         self.releases.retain(|r| r.version != release.version);
         self.releases.push(release);
+    }
+
+    /// 把刚发布的版本并入仓库，比当前对外版本新就自动顶上。
+    ///
+    /// 界面发布和远程发布（`POST /api/publish`）都走这里，免得两条路各写一份
+    /// 「要不要设成最新」的判断 —— 那种重复迟早会分叉。
+    /// 返回是否顶上了对外版本。
+    pub fn apply_publish(&mut self, release: Release) -> bool {
+        let is_newer = self
+            .latest_release()
+            .map(|cur| compare_version(&release.version, &cur.version).is_gt())
+            .unwrap_or(true);
+        let promote = is_newer || self.latest.is_empty();
+        let version = release.version.clone();
+        self.add(release);
+        if promote {
+            self.latest = version;
+        }
+        promote
     }
 
     /// 删除版本，同时删掉磁盘上的产物文件
@@ -310,5 +343,51 @@ mod tests {
         assert_eq!(back.latest_release().unwrap().version, "1.0.1");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn sample(version: &str) -> Release {
+        Release {
+            version: version.into(),
+            notes: String::new(),
+            force: false,
+            file: format!("AutoLoginQatarTool-{version}.exe"),
+            size: 1,
+            published_at: "2026-10-01 00:00:00".into(),
+            downloads: 0,
+        }
+    }
+
+    /// 对外展示顺序：`latest` 排第一，其余按版本号从新到旧。
+    /// 关键是**回滚场景** —— 把 latest 指回旧版后，版本号最大的那个不能顶到最上面，
+    /// 否则客户端会把「比当前对外版本还新、但没人该升上去」的版本摆在第一位。
+    #[test]
+    fn display_order_puts_current_latest_first_even_after_rollback() {
+        let mut repo = Repo::default();
+        for v in ["1.0.3", "1.0.5", "1.0.4"] {
+            repo.add(sample(v));
+        }
+        repo.latest = "1.0.4".into();
+        let order: Vec<&str> = repo
+            .display_order()
+            .iter()
+            .map(|r| r.version.as_str())
+            .collect();
+        assert_eq!(order, vec!["1.0.4", "1.0.5", "1.0.3"]);
+    }
+
+    /// 发布接口和界面发布共用这套判断：只有更新的版本才顶上对外版本
+    #[test]
+    fn apply_publish_promotes_only_newer_versions() {
+        let mut repo = Repo::default();
+        // 空仓库：第一个发布的版本必然成为对外版本
+        assert!(repo.apply_publish(sample("1.0.5")));
+        assert_eq!(repo.latest, "1.0.5");
+        // 更旧：只入库
+        assert!(!repo.apply_publish(sample("1.0.4")));
+        assert_eq!(repo.latest, "1.0.5");
+        // 更新：顶上
+        assert!(repo.apply_publish(sample("1.0.6")));
+        assert_eq!(repo.latest, "1.0.6");
+        assert_eq!(repo.releases.len(), 3);
     }
 }

@@ -110,6 +110,11 @@ pub fn register_all(hinst: HINSTANCE) -> bool {
         if !crate::dlg::register(hinst) {
             return false;
         }
+
+        // 「发现新版本」对话框（1.0.6）：展示全部历史版本说明
+        if !crate::upd_dlg::register(hinst) {
+            return false;
+        }
     }
     true
 }
