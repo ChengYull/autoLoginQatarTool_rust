@@ -6,7 +6,7 @@ Qatar / QtPacker 客户端自动登录工具 —— 用 Rust 对同级目录 `au
 **产物是单个 exe，拷到任何 Windows 10/11 机器上直接双击即可运行**，不需要安装运行库、不需要带 DLL。
 客户端和服务端都是如此，各自只有一个文件。
 
-当前版本：`v1.0.5`
+当前版本：`v1.0.6`
 
 版本号**只在 `Cargo.toml` 的 `version` 字段维护一份**，另外两处都由它派生：
 
@@ -348,10 +348,14 @@ AutoLoginQatarTool.exe --render-preview <输出目录> [缩放倍数]
 
 ```bash
 AutoLoginQatarTool.exe --open-dialog auto     # 自动重置密码（7 个密码）
+AutoLoginQatarTool.exe --open-dialog auto-on  # 同上，但直接进「已开启」锁定态
 AutoLoginQatarTool.exe --open-dialog custom   # 自定义密码
 ```
 
 不写界面交互就能核对对话框的排版，配合 `--render-preview` 一起用。
+
+`auto-on` 是核对锁定态（输入框禁用、按钮变「停用 / 已开启」）用的。
+**别靠点「自动重置」进这个状态** —— 那会真的调生产重置接口，给真人的钉钉发新密码。
 
 ### 启动追踪
 

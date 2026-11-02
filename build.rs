@@ -90,6 +90,10 @@ fn main() {
     let status = Command::new(&windres)
         .arg("--input-format=rc")
         .arg("--output-format=coff")
+        // app.rc 是 UTF-8（里面有中文的 FileDescription）。不指定代码页时 windres
+        // 按系统 ANSI（本机 936/GBK）读，UTF-8 的中文会被当成 GBK 双字节解一次，
+        // 结果 exe 属性里的「文件说明」是一串乱码（1.0.4 ~ 1.0.5 都是这样）。
+        .arg("--codepage=65001")
         .arg(format!("--include-dir={manifest_dir}"))
         .arg("-i")
         .arg(&rc_file)
